@@ -95,7 +95,7 @@ func Run(opts Options) error {
 	fmt.Printf("Hill climb: %d rounds x %d mutations (move +/- %.1fpx, radius +/- %.1fpx, theta +/- 30deg)\n",
 		hillClimbRounds, mutationsPerRound, moveStep, radiusStep)
 	fmt.Println("Pipeline: async (in-order queue, ring=2; sampler 1-shape stale)")
-	fmt.Println("Scoring mode: delta error with GPU-computed optimal color (negative = better)")
+	fmt.Println("Scoring mode: DeltaE with GPU-computed optimal color (negative = better)")
 
 	acceptedShapes := 0
 	consecutiveNoImprove := 0
