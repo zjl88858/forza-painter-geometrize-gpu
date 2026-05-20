@@ -3,6 +3,7 @@ package gpu
 import (
 	"fmt"
 	"math"
+	"strings"
 	"unsafe"
 
 	"forza-painter-geometrize-go/internal/model"
@@ -124,26 +125,46 @@ func NewEvaluator(target, current []float32, mask []uint8, width, height int, ma
 		return nil, fmt.Errorf("no OpenCL platforms found")
 	}
 
-	var device *cl.Device
+	var allDevices []*cl.Device
 	for _, p := range platforms {
 		devices, dErr := p.GetDevices(cl.DeviceTypeGPU)
-		if dErr == nil && len(devices) > 0 {
-			device = devices[0]
-			break
+		if dErr == nil {
+			allDevices = append(allDevices, devices...)
 		}
 	}
-	if device == nil {
+	if len(allDevices) == 0 {
 		for _, p := range platforms {
 			devices, dErr := p.GetDevices(cl.DeviceTypeAll)
-			if dErr == nil && len(devices) > 0 {
-				device = devices[0]
-				break
+			if dErr == nil {
+				allDevices = append(allDevices, devices...)
 			}
 		}
 	}
-	if device == nil {
-		return nil, fmt.Errorf("no OpenCL device found")
+	if len(allDevices) == 0 {
+		return nil, fmt.Errorf("no OpenCL devices found")
 	}
+
+	var device *cl.Device
+	var bestScore int64 = -1
+	for _, d := range allDevices {
+		score := scoreDevice(d)
+		if score > bestScore {
+			bestScore = score
+			device = d
+		}
+	}
+	if device == nil {
+		return nil, fmt.Errorf("no suitable OpenCL device found")
+	}
+
+	fmt.Printf("OpenCL: Selected device %q (Vendor: %q, GPU: %v, Discrete: %v, VRAM: %dMB, Compute Units: %d)\n",
+		device.Name(),
+		device.Vendor(),
+		device.Type()&cl.DeviceTypeGPU != 0,
+		!device.HostUnifiedMemory(),
+		device.GlobalMemSize()/(1024*1024),
+		device.MaxComputeUnits(),
+	)
 
 	ctx, err := cl.CreateContext([]*cl.Device{device})
 	if err != nil {
@@ -722,4 +743,38 @@ func (e *Evaluator) ResetCurrentBuffer(current []float32) error {
 		evt.Release()
 	}
 	return err
+}
+
+func scoreDevice(d *cl.Device) int64 {
+	var score int64
+
+	// 1. Prioritize GPUs over CPUs or other device types
+	if d.Type()&cl.DeviceTypeGPU != 0 {
+		score += 1_000_000_000_000
+	}
+
+	// 2. Prioritize Discrete GPUs (HostUnifiedMemory == false) over Integrated GPUs (HostUnifiedMemory == true)
+	if !d.HostUnifiedMemory() {
+		score += 500_000_000_000
+	}
+
+	// 3. Size of Global Memory (VRAM) as factor
+	memMB := d.GlobalMemSize() / (1024 * 1024)
+	score += memMB * 10_000
+
+	// 4. Number of parallel compute units
+	score += int64(d.MaxComputeUnits()) * 10_000
+
+	// 5. Vendor/Hardware heuristics
+	vendor := strings.ToLower(d.Vendor())
+	name := strings.ToLower(d.Name())
+	if strings.Contains(vendor, "nvidia") || strings.Contains(name, "geforce") || strings.Contains(name, "rtx") {
+		score += 5_000_000_000
+	} else if strings.Contains(vendor, "amd") || strings.Contains(name, "radeon") {
+		score += 3_000_000_000
+	} else if strings.Contains(vendor, "intel") {
+		score += 1_000_000_000
+	}
+
+	return score
 }
