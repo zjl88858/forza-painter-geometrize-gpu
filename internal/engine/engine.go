@@ -1,8 +1,3 @@
-// $env:CGO_CFLAGS='-IC:\CUDA\include'
-// $env:CGO_LDFLAGS='-LC:\msys64\ucrt64\lib -lOpenCL'
-// $env:CGO_CFLAGS='-DCL_TARGET_OPENCL_VERSION=120 -IC:\CUDA\include'
-// go build -o C:\Users\Welcome\forza-painter-fh6-v1.5.2\bin\forza-painter-geometrize-go.exe .\cmd\forza-painter-geometrize
-
 package engine
 
 import (
