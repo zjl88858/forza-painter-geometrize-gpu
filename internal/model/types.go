@@ -1,19 +1,24 @@
 package model
 
 type Settings struct {
-	Description       string
-	MaxPreviewSize    int
-	MaxResolution     int
-	MaxThreads        int
-	MutatedSamples    int
-	ForceOpaqueShapes bool
-	PosterizeLevels   int
-	PreviewEvery      int
-	RandomSamples     int
-	SaveAt            map[int]struct{}
-	SaveEvery         int
-	StopAt            int
-	UseWorkGroupEval  bool
+	Description                   string
+	MaxPreviewSize                int
+	MaxResolution                 int
+	MaxThreads                    int
+	MutatedSamples                int
+	ForceOpaqueShapes             bool
+	PosterizeLevels               int
+	PreviewEvery                  int
+	RandomSamples                 int
+	SaveAt                        map[int]struct{}
+	SaveEvery                     int
+	StopAt                        int
+	UseWorkGroupEval              bool
+	EnableProgressiveSampling     bool
+	ProgressiveSamplingStart      int
+	ProgressiveSamplingEnd        int
+	ProgressiveSamplingTransition float32
+	ProgressiveSamplingCurve      float32
 }
 
 type Shape struct {

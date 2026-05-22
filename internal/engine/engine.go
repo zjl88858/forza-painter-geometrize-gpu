@@ -1,7 +1,7 @@
 // $env:CGO_CFLAGS='-IC:\CUDA\include'
 // $env:CGO_LDFLAGS='-LC:\msys64\ucrt64\lib -lOpenCL'
 // $env:CGO_CFLAGS='-DCL_TARGET_OPENCL_VERSION=120 -IC:\CUDA\include'
-// go build -o forza.exe ./cmd/forza-painter-geometrize
+// go build -o C:\Users\Welcome\forza-painter-fh6-v1.5.2\bin\forza-painter-geometrize-go.exe .\cmd\forza-painter-geometrize
 
 package engine
 
@@ -38,8 +38,8 @@ const (
 	// up to maxHillClimbRounds rounds; each round mutates the current best
 	// shape geometry slightly, evaluates the batch on GPU, and keeps any
 	// improvement before starting the next round.
-	maxHillClimbRounds  = 32
-	idealHillClimbBatch = 64
+	maxHillClimbRounds  = 128
+	idealHillClimbBatch = 1024
 	minHillClimbRounds  = 1
 )
 
@@ -70,6 +70,42 @@ func Run(opts Options) error {
 		maxBatch = cfg.MutatedSamples
 	}
 	evaluator, err := gpu.NewEvaluator(prepared.Target, prepared.Current, prepared.OpaqueMask, prepared.Width, prepared.Height, maxBatch)
+	fmt.Println("")
+
+	fmt.Println("=== Progressive Sampling ===")
+
+	fmt.Printf(
+		"Enabled: %v\n",
+		cfg.EnableProgressiveSampling,
+	)
+
+	fmt.Printf(
+		"Start Step: %d\n",
+		cfg.ProgressiveSamplingStart,
+	)
+
+	fmt.Printf(
+		"End Step: %d\n",
+		cfg.ProgressiveSamplingEnd,
+	)
+
+	fmt.Printf(
+		"Transition: %.3f\n",
+		cfg.ProgressiveSamplingTransition,
+	)
+
+	fmt.Printf(
+		"Curve: %.2f\n",
+		cfg.ProgressiveSamplingCurve,
+	)
+
+	maxReduction := cfg.ProgressiveSamplingStart *
+		cfg.ProgressiveSamplingStart
+
+	fmt.Printf(
+		"Max Pixel Reduction: 1/%d\n",
+		maxReduction,
+	)
 	if err != nil {
 		return err
 	}
@@ -121,7 +157,7 @@ func Run(opts Options) error {
 			progress = float32(acceptedShapes) / float32(cfg.StopAt)
 		}
 
-		evaluator.SampleStep = scoringSampleStep(progress)
+		evaluator.SampleStep = scoringSampleStep(cfg, progress)
 
 		fmt.Printf("[%d/%d] Scoring sample step: %d\n",
 			step, cfg.StopAt, evaluator.SampleStep)
@@ -742,14 +778,22 @@ func maxInt(a, b int) int {
 	return b
 }
 
-func scoringSampleStep(progress float32) int {
-	if progress >= 0.333 {
+func scoringSampleStep(cfg model.Settings, progress float32) int {
+	if !cfg.EnableProgressiveSampling {
 		return 1
 	}
 
-	t := float64(progress / 0.333)
+	if progress >= cfg.ProgressiveSamplingTransition {
+		return cfg.ProgressiveSamplingEnd
+	}
 
-	step := 1.0 + 7.0*math.Pow(1.0-t, 2.0)
+	t := float64(progress / cfg.ProgressiveSamplingTransition)
+
+	start := float64(cfg.ProgressiveSamplingStart)
+	end := float64(cfg.ProgressiveSamplingEnd)
+	curve := float64(cfg.ProgressiveSamplingCurve)
+
+	step := end + (start-end)*math.Pow(1.0-t, curve)
 
 	if step < 1 {
 		return 1

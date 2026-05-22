@@ -13,19 +13,24 @@ import (
 
 func DefaultSettings() model.Settings {
 	return model.Settings{
-		Description:       "Default profile",
-		MaxPreviewSize:    500,
-		MaxResolution:     2000,
-		MaxThreads:        0,
-		MutatedSamples:    1000,
-		ForceOpaqueShapes: true,
-		PosterizeLevels:   20,
-		PreviewEvery:      10,
-		RandomSamples:     3000,
-		SaveAt:            map[int]struct{}{500: {}, 1000: {}, 1500: {}, 2000: {}, 2500: {}, 3000: {}},
-		SaveEvery:         10,
-		StopAt:            3000,
-		UseWorkGroupEval:  true,
+		Description:                   "Default profile",
+		MaxPreviewSize:                500,
+		MaxResolution:                 2000,
+		MaxThreads:                    0,
+		MutatedSamples:                1000,
+		ForceOpaqueShapes:             true,
+		PosterizeLevels:               20,
+		PreviewEvery:                  10,
+		RandomSamples:                 3000,
+		SaveAt:                        map[int]struct{}{500: {}, 1000: {}, 1500: {}, 2000: {}, 2500: {}, 3000: {}},
+		SaveEvery:                     10,
+		StopAt:                        3000,
+		UseWorkGroupEval:              true,
+		EnableProgressiveSampling:     true,
+		ProgressiveSamplingStart:      4, // New parametrs
+		ProgressiveSamplingEnd:        1,
+		ProgressiveSamplingTransition: 0.333,
+		ProgressiveSamplingCurve:      2.5,
 	}
 }
 
@@ -104,6 +109,20 @@ func ParseSettings(path string) (model.Settings, error) {
 			cfg.StopAt = parseInt(value, cfg.StopAt)
 		case "useWorkGroupEval":
 			cfg.UseWorkGroupEval = parseBool(value, cfg.UseWorkGroupEval)
+		case "enableProgressiveSampling":
+			cfg.EnableProgressiveSampling = parseBool(value, cfg.EnableProgressiveSampling)
+
+		case "progressiveSamplingStart":
+			cfg.ProgressiveSamplingStart = parseInt(value, cfg.ProgressiveSamplingStart)
+
+		case "progressiveSamplingEnd":
+			cfg.ProgressiveSamplingEnd = parseInt(value, cfg.ProgressiveSamplingEnd)
+
+		case "progressiveSamplingTransition":
+			cfg.ProgressiveSamplingTransition = parseFloat(value, cfg.ProgressiveSamplingTransition)
+
+		case "progressiveSamplingCurve":
+			cfg.ProgressiveSamplingCurve = parseFloat(value, cfg.ProgressiveSamplingCurve)
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -123,6 +142,22 @@ func ParseSettings(path string) (model.Settings, error) {
 		cfg.SaveEvery = 1
 	}
 
+	if cfg.ProgressiveSamplingStart < 1 {
+		cfg.ProgressiveSamplingStart = 1
+	}
+
+	if cfg.ProgressiveSamplingEnd < 1 {
+		cfg.ProgressiveSamplingEnd = 1
+	}
+
+	if cfg.ProgressiveSamplingTransition <= 0 {
+		cfg.ProgressiveSamplingTransition = 0.333
+	}
+
+	if cfg.ProgressiveSamplingCurve <= 0 {
+		cfg.ProgressiveSamplingCurve = 2.0
+	}
+
 	return cfg, nil
 }
 func parseInt(value string, fallback int) int {
@@ -131,6 +166,14 @@ func parseInt(value string, fallback int) int {
 		return fallback
 	}
 	return n
+}
+
+func parseFloat(value string, fallback float32) float32 {
+	n, err := strconv.ParseFloat(strings.TrimSpace(value), 32)
+	if err != nil {
+		return fallback
+	}
+	return float32(n)
 }
 
 func parseBool(value string, fallback bool) bool {
