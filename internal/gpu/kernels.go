@@ -34,10 +34,10 @@ package gpu
 //	counted separately as Nt. Because the FH6 in-game renderer ignores
 //	our alpha mask and paints the *full* ellipse, any shape that
 //	extends into the transparent region produces a visible halo against
-//	whatever body colour the user picked. We therefore HARD REJECT
-//	candidates whose overhang exceeds a small tolerance (Nt*20 > N,
-//	i.e. >~5% of inside pixels are transparent). The tolerance keeps
-//	anti-aliased silhouette edges usable.
+//	whatever body colour the user picked. We therefore hard-reject
+//	candidates with too much spill, using both a relative limit and an
+//	absolute pixel cap so large ellipses cannot sneak through with a
+//	large transparent tail.
 //
 // apply_candidate_v2:
 //
@@ -140,10 +140,10 @@ __kernel void evaluate_candidates_v3(
 
     // Hard reject:
     //   - shapes covering no opaque pixel at all
-    //   - shapes whose transparent overhang exceeds ~5% of inside area
-    // The 20*Nt > N test is equivalent to Nt/(N+Nt) > ~4.76%.
-    // TODO: canary build test 1% inside area to anti overhang
-    if (N == 0 || Nt * 100 > N) {
+    //   - shapes with more than a tiny transparent spill
+    // Keep this strict enough that large early ellipses do not wander
+    // heavily into the transparent region.
+    if (N == 0 || Nt > 64 || Nt * 400 > N) {
         results[gid * 4 + 0] = 3.402823466e+38f;
         results[gid * 4 + 1] = 0.0f;
         results[gid * 4 + 2] = 0.0f;
@@ -184,12 +184,11 @@ __kernel void evaluate_candidates_v3(
     float sampleScale = (float)(sampleStride * sampleStride);
     totalDelta *= sampleScale;
 
-    // Soft penalty within the tolerance budget: each remaining
-    // transparent pixel still adds α²·(1+oR²+oG²+oB²) so that the
-    // optimiser prefers zero overhang over allowed overhang when the
-    // opaque-side error is otherwise tied.
+    // Remaining spill is still penalized so the optimiser prefers
+    // tighter shapes even before the hard cap triggers.
     if (Nt > 0) {
-        float penalty = a2 * ((float)Nt) * (oR*oR + oG*oG + oB*oB + 1.0f);
+        float spillFrac = (float)Nt / (float)(N + Nt);
+        float penalty = a2 * ((float)Nt) * (1.0f + 2.0f * spillFrac) * (oR*oR + oG*oG + oB*oB + 1.0f);
         totalDelta += penalty;
     }
 
@@ -343,7 +342,7 @@ __kernel void evaluate_candidates_v4(
     sTCR= l_data[14]; sTCG= l_data[15]; sTCB= l_data[16]; sTCA= l_data[17];
 
     // Hard reject (same thresholds as v3).
-    if (N == 0 || Nt * 100 > N) {
+    if (N == 0 || Nt > 64 || Nt * 400 > N) {
         results[gid * 4 + 0] = 3.402823466e+38f;
         results[gid * 4 + 1] = 0.0f;
         results[gid * 4 + 2] = 0.0f;
@@ -377,7 +376,8 @@ __kernel void evaluate_candidates_v4(
     totalDelta *= sampleScale;
 
     if (Nt > 0) {
-        totalDelta += a2 * ((float)Nt) * (oR*oR + oG*oG + oB*oB + 1.0f);
+        float spillFrac = (float)Nt / (float)(N + Nt);
+        totalDelta += a2 * ((float)Nt) * (1.0f + 2.0f * spillFrac) * (oR*oR + oG*oG + oB*oB + 1.0f);
     }
 
     results[gid * 4 + 0] = totalDelta;

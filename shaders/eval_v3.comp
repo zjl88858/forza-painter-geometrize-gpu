@@ -101,7 +101,7 @@ void main() {
         }
     }
 
-    if (N == 0 || Nt * 100 > N) {
+    if (N == 0 || Nt > 64 || Nt * 400 > N) {
         results[gid] = vec4(3.402823466e+38, 0.0, 0.0, 0.0);
         return;
     }
@@ -132,7 +132,8 @@ void main() {
     totalDelta *= sampleScale;
 
     if (Nt > 0) {
-        float penalty = a2 * float(Nt) * (oR*oR + oG*oG + oB*oB + 1.0);
+        float spillFrac = float(Nt) / float(N + Nt);
+        float penalty = a2 * float(Nt) * (1.0 + 2.0 * spillFrac) * (oR*oR + oG*oG + oB*oB + 1.0);
         totalDelta += penalty;
     }
 

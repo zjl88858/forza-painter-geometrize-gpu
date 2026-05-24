@@ -214,6 +214,16 @@ func Run(opts Options) error {
 		if err != nil {
 			return err
 		}
+		if isRejectedEvalScore(finalScore) {
+			consecutiveNoImprove++
+			fmt.Printf("[%d/%d] Quantized candidate rejected after re-eval (delta %.6f). Retry %d/%d\n",
+				step, cfg.StopAt, finalScore, consecutiveNoImprove, maxNoImproveRetries)
+			if consecutiveNoImprove >= maxNoImproveRetries {
+				fmt.Printf("Stopped early: reached max retries without improvement (%d)\n", maxNoImproveRetries)
+				break
+			}
+			continue
+		}
 
 		// Submit apply non-blocking; the in-order queue ensures any
 		// follow-up eval / grid kernel sees the updated canvas.
@@ -623,6 +633,13 @@ func submitAndPickBest(e gpu.Backend, cands []model.Candidate) (model.Candidate,
 	best.G = results[bestIdx].G
 	best.B = results[bestIdx].B
 	return best, bestScore, nil
+}
+
+func isRejectedEvalScore(score float32) bool {
+	if math.IsNaN(float64(score)) || math.IsInf(float64(score), 0) {
+		return true
+	}
+	return score >= float32(math.MaxFloat32)*0.5
 }
 
 func toShape(c model.Candidate, score float64) model.Shape {

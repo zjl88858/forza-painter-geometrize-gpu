@@ -374,6 +374,10 @@ static VkResult rawVkQueueSubmitOne(VkQueue queue, VkCommandBuffer cmdBuf, VkFen
 	return vkQueueSubmit(queue, 1, &submitInfo, fence);
 }
 
+static VkResult rawVkResetCommandBufferOne(VkCommandBuffer commandBuffer) {
+	return vkResetCommandBuffer(commandBuffer, 0);
+}
+
 static VkResult rawVkWaitForFencesOne(VkDevice device, VkFence fence, uint64_t timeout) {
 	return vkWaitForFences(device, 1, &fence, VK_TRUE, timeout);
 }
@@ -568,6 +572,9 @@ type vulkanBackend struct {
 	cmdBufs [ringSize]vkCommandBuffer
 	fences  [ringSize]vkFence
 
+	gridCmdBufs [ringSize]vkCommandBuffer
+	gridFences  [ringSize]vkFence
+
 	applyCmdBufs  [ringSize]vkCommandBuffer
 	applyFences   [ringSize]vkFence
 	applySlots    [ringSize]vkEvalSlot
@@ -715,6 +722,10 @@ func newVulkanBackend(target, current []float32, maskData []uint8, width, height
 		cleanup()
 		return nil, fmt.Errorf("command buffers: %w", err)
 	}
+	if err := v.allocGridResources(); err != nil {
+		cleanup()
+		return nil, fmt.Errorf("grid resources: %w", err)
+	}
 	if err := v.allocTransferResources(); err != nil {
 		cleanup()
 		return nil, fmt.Errorf("transfer resources: %w", err)
@@ -819,6 +830,16 @@ func (v *vulkanBackend) destroy() {
 	if v.cmdBufs[0] != nil {
 		C.rawVkFreeCommandBuffers(v.device, v.commandPool, C.uint32_t(len(v.cmdBufs)), &v.cmdBufs[0])
 		v.cmdBufs = [ringSize]vkCommandBuffer{}
+	}
+	for i := 0; i < ringSize; i++ {
+		if v.gridFences[i] != nil {
+			C.rawVkDestroyFence(v.device, v.gridFences[i], nil)
+			v.gridFences[i] = nil
+		}
+	}
+	if v.gridCmdBufs[0] != nil {
+		C.rawVkFreeCommandBuffers(v.device, v.commandPool, C.uint32_t(len(v.gridCmdBufs)), &v.gridCmdBufs[0])
+		v.gridCmdBufs = [ringSize]vkCommandBuffer{}
 	}
 	if v.dsPool != nil {
 		C.rawVkDestroyDescriptorPool(v.device, v.dsPool, nil)
@@ -931,6 +952,10 @@ func (v *vulkanBackend) Flush() error {
 			fence := v.fences[i]
 			C.rawVkResetFencesOne(v.device, fence)
 		}
+		if v.gridFences[i] != nil {
+			fence := v.gridFences[i]
+			C.rawVkResetFencesOne(v.device, fence)
+		}
 		if v.applyFences[i] != nil {
 			fence := v.applyFences[i]
 			C.rawVkResetFencesOne(v.device, fence)
@@ -1036,7 +1061,7 @@ func (v *vulkanBackend) SubmitEval(cands []model.Candidate) (EvalTicket, error) 
 	if err := v.endCommandBuffer(cmdBuf); err != nil {
 		return EvalTicket{}, err
 	}
-	if err := v.submit(cmdBuf, v.fences[slot]); err != nil {
+	if err := v.submit("eval", cmdBuf, v.fences[slot]); err != nil {
 		return EvalTicket{}, err
 	}
 
@@ -1151,7 +1176,7 @@ func (v *vulkanBackend) SubmitApply(candidate model.Candidate) error {
 	if err := v.endCommandBuffer(cmdBuf); err != nil {
 		return err
 	}
-	if err := v.submit(cmdBuf, v.applyFences[slot]); err != nil {
+	if err := v.submit("apply", cmdBuf, v.applyFences[slot]); err != nil {
 		return err
 	}
 	v.applySeq++
@@ -1177,10 +1202,10 @@ func (v *vulkanBackend) SubmitErrorGrid() (GridTicket, error) {
 			return GridTicket{}, err
 		}
 	}
-	if err := v.resetFence(slot); err != nil {
+	if err := v.resetGridFence(slot); err != nil {
 		return GridTicket{}, err
 	}
-	cmdBuf := v.cmdBufs[slot]
+	cmdBuf := v.gridCmdBufs[slot]
 	if err := v.beginCommandBuffer(cmdBuf); err != nil {
 		return GridTicket{}, err
 	}
@@ -1203,7 +1228,7 @@ func (v *vulkanBackend) SubmitErrorGrid() (GridTicket, error) {
 	if err := v.endCommandBuffer(cmdBuf); err != nil {
 		return GridTicket{}, err
 	}
-	if err := v.submit(cmdBuf, v.fences[slot]); err != nil {
+	if err := v.submit("grid", cmdBuf, v.gridFences[slot]); err != nil {
 		return GridTicket{}, err
 	}
 	v.gridSeq++
@@ -1219,7 +1244,7 @@ func (v *vulkanBackend) WaitErrorGrid(t GridTicket) ([]float32, int, int, error)
 	if !s.busy || s.seq != t.seq {
 		return nil, 0, 0, fmt.Errorf("WaitErrorGrid: stale or invalid ticket")
 	}
-	if err := v.waitFence(t.slot); err != nil {
+	if err := v.waitGridFence(t.slot); err != nil {
 		return nil, 0, 0, err
 	}
 	s.busy = false
@@ -1260,12 +1285,12 @@ func (v *vulkanBackend) ResetCurrentBuffer(current []float32) error {
 	return v.upload(current, v.currentBuf, len(current)*4)
 }
 
-func (v *vulkanBackend) submit(cmdBuf vkCommandBuffer, fence vkFence) error {
+func (v *vulkanBackend) submit(kind string, cmdBuf vkCommandBuffer, fence vkFence) error {
 	v.submitMu.Lock()
 	defer v.submitMu.Unlock()
 	res := C.rawVkQueueSubmitOne(v.queue, cmdBuf, fence)
 	if res != C.VK_SUCCESS {
-		return fmt.Errorf("vkQueueSubmit failed: %d", int(res))
+		return fmt.Errorf("%s: vkQueueSubmit failed: %d", kind, int(res))
 	}
 	return nil
 }
@@ -1302,6 +1327,22 @@ func (v *vulkanBackend) resetTransferFence() error {
 	}
 	if res := C.rawVkResetFencesOne(v.device, v.transferFence); res != C.VK_SUCCESS {
 		return fmt.Errorf("vkResetFences[transfer]: %d", int(res))
+	}
+	return nil
+}
+
+func (v *vulkanBackend) resetGridFence(slot int) error {
+	fence := v.gridFences[slot]
+	if res := C.rawVkResetFencesOne(v.device, fence); res != C.VK_SUCCESS {
+		return fmt.Errorf("vkResetFences[grid:%d]: %d", slot, int(res))
+	}
+	return nil
+}
+
+func (v *vulkanBackend) waitGridFence(slot int) error {
+	fence := v.gridFences[slot]
+	if res := C.rawVkWaitForFencesOne(v.device, fence, vkMaxTimeout); res != C.VK_SUCCESS {
+		return fmt.Errorf("vkWaitForFences[grid:%d]: %d", slot, int(res))
 	}
 	return nil
 }
@@ -1356,7 +1397,7 @@ func (v *vulkanBackend) upload(data []float32, dstBuf vkBuffer, size int) error 
 	if err := v.endCommandBuffer(cmdBuf); err != nil {
 		return err
 	}
-	if err := v.submit(cmdBuf, v.transferFence); err != nil {
+	if err := v.submit("transfer upload", cmdBuf, v.transferFence); err != nil {
 		return err
 	}
 	if res := C.rawVkWaitForFencesOne(v.device, v.transferFence, vkMaxTimeout); res != C.VK_SUCCESS {
@@ -1390,7 +1431,7 @@ func (v *vulkanBackend) download(srcBuf vkBuffer, size int) error {
 	if err := v.endCommandBuffer(cmdBuf); err != nil {
 		return err
 	}
-	if err := v.submit(cmdBuf, v.transferFence); err != nil {
+	if err := v.submit("transfer download", cmdBuf, v.transferFence); err != nil {
 		return err
 	}
 	if res := C.rawVkWaitForFencesOne(v.device, v.transferFence, vkMaxTimeout); res != C.VK_SUCCESS {
@@ -1852,7 +1893,43 @@ func (v *vulkanBackend) allocCommandBuffers() error {
 	return nil
 }
 
+func (v *vulkanBackend) allocGridResources() error {
+	ai := C.VkCommandBufferAllocateInfo{
+		sType:              C.VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+		commandPool:        v.commandPool,
+		level:              C.VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+		commandBufferCount: C.uint32_t(ringSize),
+	}
+	var tmp [ringSize]vkCommandBuffer
+	if res := C.rawVkCreateCommandBuffer(v.device, &ai, &tmp[0]); res != C.VK_SUCCESS {
+		return fmt.Errorf("vkAllocateCommandBuffers(grid): %d", int(res))
+	}
+	v.gridCmdBufs = tmp
+	fci := C.VkFenceCreateInfo{
+		sType: C.VK_STRUCTURE_TYPE_FENCE_CREATE_INFO,
+		flags: C.VK_FENCE_CREATE_SIGNALED_BIT,
+	}
+	for i := 0; i < ringSize; i++ {
+		fence := v.gridFences[i]
+		if res := C.rawVkCreateFence(v.device, &fci, nil, &fence); res != C.VK_SUCCESS {
+			for j := 0; j < i; j++ {
+				C.rawVkDestroyFence(v.device, v.gridFences[j], nil)
+				v.gridFences[j] = nil
+			}
+			C.rawVkFreeCommandBuffers(v.device, v.commandPool, C.uint32_t(ringSize), &v.gridCmdBufs[0])
+			v.gridCmdBufs = [ringSize]vkCommandBuffer{}
+			v.gridFences = [ringSize]vkFence{}
+			return fmt.Errorf("vkCreateFence(grid[%d]): %d", i, int(res))
+		}
+		v.gridFences[i] = fence
+	}
+	return nil
+}
+
 func (v *vulkanBackend) beginCommandBuffer(cmdBuf vkCommandBuffer) error {
+	if res := C.rawVkResetCommandBufferOne(cmdBuf); res != C.VK_SUCCESS {
+		return fmt.Errorf("vkResetCommandBuffer: %d", int(res))
+	}
 	bi := C.VkCommandBufferBeginInfo{sType: C.VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, flags: C.VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT}
 	if res := C.rawVkBeginCommandBuffer(cmdBuf, &bi); res != C.VK_SUCCESS {
 		return fmt.Errorf("vkBeginCommandBuffer: %d", int(res))

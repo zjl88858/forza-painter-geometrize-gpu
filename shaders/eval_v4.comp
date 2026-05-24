@@ -149,7 +149,7 @@ void main() {
     sCR2= l_data[10]; sCG2= l_data[11]; sCB2= l_data[12]; sCA2= l_data[13];
     sTCR= l_data[14]; sTCG= l_data[15]; sTCB= l_data[16]; sTCA= l_data[17];
 
-    if (N == 0 || Nt * 100 > N) {
+    if (N == 0 || Nt > 64 || Nt * 400 > N) {
         results[gid] = vec4(3.402823466e+38, 0.0, 0.0, 0.0);
         return;
     }
@@ -180,7 +180,8 @@ void main() {
     totalDelta *= sampleScale;
 
     if (Nt > 0) {
-        totalDelta += a2 * float(Nt) * (oR*oR + oG*oG + oB*oB + 1.0);
+        float spillFrac = float(Nt) / float(N + Nt);
+        totalDelta += a2 * float(Nt) * (1.0 + 2.0 * spillFrac) * (oR*oR + oG*oG + oB*oB + 1.0);
     }
 
     results[gid] = vec4(totalDelta, oR, oG, oB);
