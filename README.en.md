@@ -66,6 +66,8 @@ Usage of forza-painter-geometrize-go.exe:
         Optional preview PNG output path
   -profile string
         Profile name fragment under ./settings
+  -resume string
+        Resume from a saved geometry checkpoint JSON
   -seed int
         Optional RNG seed for reproducible output
   -settings string

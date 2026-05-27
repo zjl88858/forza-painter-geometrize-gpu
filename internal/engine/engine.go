@@ -24,6 +24,7 @@ type Options struct {
 	WorkspaceRoot string
 	Seed          int64
 	Backend       string
+	ResumePath    string
 }
 
 const (
@@ -119,9 +120,29 @@ func Run(opts Options) error {
 	denom := float64(maxInt(1, opaquePixels*4))
 
 	shapes := []model.Shape{backgroundShape(prepared, normalizeScore(currentError, denom))}
+	acceptedShapes := 0
 
 	moveStep, radiusStep := mutationSteps(prepared.Width, prepared.Height)
 	hillClimbRounds, mutationsPerRound := planHillClimb(cfg.MutatedSamples)
+
+	resumePath := opts.ResumePath
+	if resumePath == "" {
+		resumePath = cfg.LoadGeometry
+	}
+	if resumePath != "" {
+		restoredShapes, restoredCount, resumeErr := restoreCheckpoint(resumePath, prepared, cfg.ForceOpaqueShapes, evaluator)
+		if resumeErr != nil {
+			return resumeErr
+		}
+		if restoredCount >= cfg.StopAt {
+			return fmt.Errorf("checkpoint already has %d shapes (target stopAt=%d)", restoredCount, cfg.StopAt)
+		}
+		shapes = restoredShapes
+		acceptedShapes = restoredCount
+		currentError, opaquePixels = computeTotalError(prepared.Target, prepared.Current, prepared.OpaqueMask)
+		denom = float64(maxInt(1, opaquePixels*4))
+		fmt.Printf("Resumed from checkpoint: %s (%d/%d shapes)\n", resumePath, acceptedShapes, cfg.StopAt)
+	}
 
 	// Initial sampler is computed synchronously - the engine has nothing
 	// useful to do until the first random batch can be sampled.
@@ -141,7 +162,6 @@ func Run(opts Options) error {
 	fmt.Println("Pipeline: async (in-order queue, ring=3; sampler 1-shape stale)")
 	fmt.Println("Scoring mode: DeltaE with GPU-computed optimal color (negative = better)")
 
-	acceptedShapes := 0
 	consecutiveNoImprove := 0
 	finalPruneAttempts := 0
 	lastPrunedMilestone := 0
@@ -206,9 +226,9 @@ func Run(opts Options) error {
 
 		consecutiveNoImprove = 0
 
-		// Quantize the accepted geometry first, then re-evaluate that exact
-		// candidate so the applied canvas, score bookkeeping, and exported
-		// JSON all describe the same shape.
+		// Snap the accepted geometry onto the game's visible precision grid,
+		// then re-evaluate that exact candidate so the applied canvas and
+		// score bookkeeping match what the game will actually see.
 		final := quantizeCandidate(best, prepared.Width, prepared.Height, cfg.ForceOpaqueShapes)
 		final, finalScore, err := submitAndPickBest(evaluator, []model.Candidate{final})
 		if err != nil {
@@ -539,24 +559,24 @@ func randomCandidates(rng *rand.Rand, prepared *imageutil.PreparedImage, count i
 		if !forceOpaque {
 			alpha = randRange(rng, 0.3, 1.0)
 		}
-		out = append(out, model.Candidate{
+		out = append(out, quantizeCandidate(model.Candidate{
 			X:     x,
 			Y:     y,
 			RX:    randRange(rng, minRadius, maxRadius),
 			RY:    randRange(rng, minRadius, maxRadius),
 			Theta: rng.Float32() * 360,
 			A:     alpha,
-		})
+		}, prepared.Width, prepared.Height, forceOpaque))
 	}
 	if len(out) == 0 {
-		out = append(out, model.Candidate{
+		out = append(out, quantizeCandidate(model.Candidate{
 			X:     w * 0.5,
 			Y:     h * 0.5,
 			RX:    maxRadius * 0.25,
 			RY:    maxRadius * 0.25,
 			Theta: 0,
 			A:     1.0,
-		})
+		}, prepared.Width, prepared.Height, forceOpaque))
 	}
 	return out
 }
@@ -596,10 +616,10 @@ func mutatedCandidates(rng *rand.Rand, prepared *imageutil.PreparedImage, base m
 		if forceOpaque {
 			cand.A = 1.0
 		}
-		out = append(out, cand)
+		out = append(out, quantizeCandidate(cand, prepared.Width, prepared.Height, forceOpaque))
 	}
 	if len(out) == 0 {
-		out = append(out, base)
+		out = append(out, quantizeCandidate(base, prepared.Width, prepared.Height, forceOpaque))
 	}
 	return out
 }
@@ -755,33 +775,54 @@ func normalizeScore(totalError, denom float64) float64 {
 	return math.Round(value*1_000_000) / 1_000_000
 }
 
-// quantizeCandidate is now only invoked at acceptance time. The GPU
-// search runs on full-precision floats; the final shape that is committed
-// both to the canvas and to the JSON gets snapped to the integer grid the
-// game expects (pixel positions, integer angle, 8-bit colour).
+// quantizeCandidate snaps geometry onto the game's visible precision grid
+// so the search evaluates the same values the game will actually consume.
+// The JSON export remains integer-based for downstream tooling.
 func quantizeCandidate(c model.Candidate, width, height int, forceOpaque bool) model.Candidate {
-	c.X = float32(clampInt(int(math.Round(float64(c.X))), 0, maxInt(0, width-1)))
-	c.Y = float32(clampInt(int(math.Round(float64(c.Y))), 0, maxInt(0, height-1)))
-	c.RX = float32(maxInt(1, int(math.Round(float64(c.RX)))))
-	c.RY = float32(maxInt(1, int(math.Round(float64(c.RY)))))
-
-	angle := int(math.Round(float64(c.Theta))) % 360
-	if angle < 0 {
-		angle += 360
-	}
-	if angle == 0 && c.Theta > 359.5 {
-		angle = 360
-	}
-	c.Theta = float32(angle)
+	c.X = snap2(clampFloat(c.X, 0, float32(maxInt(0, width-1))))
+	c.Y = snap2(clampFloat(c.Y, 0, float32(maxInt(0, height-1))))
+	c.RX = snap2(maxFloat(0.01, c.RX))
+	c.RY = snap2(maxFloat(0.01, c.RY))
+	c.Theta = snap2(normalizeAngle(c.Theta))
 
 	if forceOpaque {
 		c.A = 1.0
+	} else {
+		c.A = snap2(clampFloat(c.A, 0, 1))
 	}
-	c.R = float32(f32ToByte(c.R)) / 255.0
-	c.G = float32(f32ToByte(c.G)) / 255.0
-	c.B = float32(f32ToByte(c.B)) / 255.0
-	c.A = float32(f32ToByte(c.A)) / 255.0
+	c.R = snap2(clampFloat(c.R, 0, 1))
+	c.G = snap2(clampFloat(c.G, 0, 1))
+	c.B = snap2(clampFloat(c.B, 0, 1))
 	return c
+}
+
+func snap2(v float32) float32 {
+	return float32(math.Trunc(float64(v*100)) / 100)
+}
+
+func normalizeAngle(v float32) float32 {
+	v = float32(math.Mod(float64(v), 360))
+	if v < 0 {
+		v += 360
+	}
+	return v
+}
+
+func clampFloat(v, minV, maxV float32) float32 {
+	if v < minV {
+		return minV
+	}
+	if v > maxV {
+		return maxV
+	}
+	return v
+}
+
+func maxFloat(a, b float32) float32 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func clampInt(v, minV, maxV int) int {

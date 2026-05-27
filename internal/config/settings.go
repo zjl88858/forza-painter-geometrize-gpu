@@ -126,6 +126,8 @@ func ParseSettings(path string) (model.Settings, error) {
 			cfg.ProgressiveSamplingCurve = parseFloat(value, cfg.ProgressiveSamplingCurve)
 		case "errorGridSize":
 			cfg.ErrorGridSize = parseInt(value, cfg.ErrorGridSize)
+		case "loadGeometry":
+			cfg.LoadGeometry = value
 		}
 	}
 	if err := scanner.Err(); err != nil {

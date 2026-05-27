@@ -20,6 +20,7 @@ type Settings struct {
 	ProgressiveSamplingTransition float32
 	ProgressiveSamplingCurve      float32
 	ErrorGridSize                 int
+	LoadGeometry                  string
 }
 
 type Shape struct {
