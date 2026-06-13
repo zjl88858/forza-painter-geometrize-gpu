@@ -63,10 +63,17 @@ func looksLikeBackground(shape model.Shape) bool {
 }
 
 func shapeToCandidate(shape model.Shape) (model.Candidate, bool) {
-	if shape.Type != 16 || len(shape.Data) < 5 || len(shape.Color) < 4 {
+	if (shape.Type != 0 && shape.Type != 16 && shape.Type != 2) || len(shape.Data) < 5 || len(shape.Color) < 4 {
 		return model.Candidate{}, false
 	}
+	shapeType := 0
+	if shape.Type == 16 {
+		shapeType = 1
+	} else if shape.Type == 2 {
+		shapeType = 2
+	}
 	return model.Candidate{
+		ShapeType: shapeType,
 		X:     float32(shape.Data[0]),
 		Y:     float32(shape.Data[1]),
 		RX:    float32(shape.Data[2]),

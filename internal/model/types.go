@@ -35,6 +35,7 @@ type Geometry struct {
 }
 
 type Candidate struct {
+	ShapeType int     // 0=rectangle, 1=circle, 2=triangle
 	X     float32
 	Y     float32
 	RX    float32

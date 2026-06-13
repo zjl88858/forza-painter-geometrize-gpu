@@ -26,26 +26,21 @@ void main() {
     }
     uint lid = gl_LocalInvocationID.y * 16 + gl_LocalInvocationID.x;
 
-    int base = int(gid) * 6;
+    int base = int(gid) * 7;
     float cx       = candidates[base + 0];
     float cy       = candidates[base + 1];
     float rx       = max(candidates[base + 2], 1.0);
     float ry       = max(candidates[base + 3], 1.0);
     float thetaDeg = candidates[base + 4];
     float ca       = clamp(candidates[base + 5], 1e-3, 1.0);
+    int   shapeType = int(candidates[base + 6]);
 
     float theta = thetaDeg * 0.01745329251994329577;
     float cosT  = cos(theta);
     float sinT  = sin(theta);
-    float invRX2 = 1.0 / (rx * rx);
-    float invRY2 = 1.0 / (ry * ry);
 
-    float rx2  = rx * rx;
-    float ry2  = ry * ry;
-    float cos2 = cosT * cosT;
-    float sin2 = sinT * sinT;
-    float ex   = sqrt(rx2 * cos2 + ry2 * sin2);
-    float ey   = sqrt(rx2 * sin2 + ry2 * cos2);
+    float ex = abs(rx * cosT) + abs(ry * sinT);
+    float ey = abs(rx * sinT) + abs(ry * cosT);
 
     int xMin = int(floor(cx - ex - 1.0));
     int xMax = int(ceil(cx + ex + 1.0));
@@ -83,7 +78,18 @@ void main() {
         float dy = (float(y) + 0.5) - cy;
         float xr = dx * cosT + dy * sinT;
         float yr = -dx * sinT + dy * cosT;
-        if (xr * xr * invRX2 + yr * yr * invRY2 > 1.0) {
+        bool inside = false;
+        if (shapeType == 1) {
+            inside = (xr*xr*(1.0/(rx*rx)) + yr*yr*(1.0/(ry*ry)) <= 1.0);
+        } else if (shapeType == 2) {
+            if (yr >= -ry && yr <= ry) {
+                float halfWidth = rx * (yr + ry) / (2.0 * ry);
+                inside = (abs(xr) <= halfWidth);
+            }
+        } else {
+            inside = (abs(xr) <= rx && abs(yr) <= ry);
+        }
+        if (!inside) {
             continue;
         }
         int p = y * width + x;

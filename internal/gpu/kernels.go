@@ -63,26 +63,20 @@ __kernel void evaluate_candidates_v3(
 ) {
     int gid = get_global_id(0);
 
-    int base = gid * 6;
+    int base = gid * 7;
     float cx = candidates[base + 0];
     float cy = candidates[base + 1];
     float rx = fmax(candidates[base + 2], 1.0f);
     float ry = fmax(candidates[base + 3], 1.0f);
     float thetaDeg = candidates[base + 4];
     float ca = clamp(candidates[base + 5], 1e-3f, 1.0f);
+    int shapeType = (int)candidates[base + 6];
 
     float theta = thetaDeg * 0.01745329251994329577f;
     float cosT = cos(theta);
     float sinT = sin(theta);
-    float invRX2 = 1.0f / (rx * rx);
-    float invRY2 = 1.0f / (ry * ry);
-
-    float rx2 = rx * rx;
-    float ry2 = ry * ry;
-    float cos2 = cosT * cosT;
-    float sin2 = sinT * sinT;
-    float ex = sqrt(rx2 * cos2 + ry2 * sin2);
-    float ey = sqrt(rx2 * sin2 + ry2 * cos2);
+    float ex = fabs(rx * cosT) + fabs(ry * sinT);
+    float ey = fabs(rx * sinT) + fabs(ry * cosT);
 
     int xMin = (int)floor(cx - ex - 1.0f);
     int xMax = (int)ceil(cx + ex + 1.0f);
@@ -112,8 +106,20 @@ __kernel void evaluate_candidates_v3(
             float dx = ((float)x + 0.5f) - cx;
             float xr = dx * cosT + dy * sinT;
             float yr = -dx * sinT + dy * cosT;
-            if (xr * xr * invRX2 + yr * yr * invRY2 > 1.0f) {
-                continue;
+            bool inside = false;
+            if (shapeType == 1) {
+                float invRX2 = 1.0f / (rx * rx);
+                float invRY2 = 1.0f / (ry * ry);
+                inside = (xr * xr * invRX2 + yr * yr * invRY2 <= 1.0f);
+            } else if (shapeType == 2) {
+                if (yr >= -ry && yr <= ry) {
+                    float halfWidth = rx * (yr + ry) / (2.0f * ry);
+                    inside = (fabs(xr) <= halfWidth);
+                }
+            } else {
+                inside = (fabs(xr) <= rx && fabs(yr) <= ry);
+            }
+            if (!inside) { continue;
             }
             int p = row + x;
             if (opaqueMask[p] == 0) {
@@ -225,26 +231,20 @@ __kernel void evaluate_candidates_v4(
     int gid = get_group_id(0);   // candidate index
     int lid = get_local_id(1) * get_local_size(0) + get_local_id(0); // 0..255
 
-    int base = gid * 6;
+    int base = gid * 7;
     float cx = candidates[base + 0];
     float cy = candidates[base + 1];
     float rx = fmax(candidates[base + 2], 1.0f);
     float ry = fmax(candidates[base + 3], 1.0f);
     float thetaDeg = candidates[base + 4];
     float ca = clamp(candidates[base + 5], 1e-3f, 1.0f);
+    int shapeType = (int)candidates[base + 6];
 
     float theta = thetaDeg * 0.01745329251994329577f;
     float cosT = cos(theta);
     float sinT = sin(theta);
-    float invRX2 = 1.0f / (rx * rx);
-    float invRY2 = 1.0f / (ry * ry);
-
-    float rx2 = rx * rx;
-    float ry2 = ry * ry;
-    float cos2 = cosT * cosT;
-    float sin2 = sinT * sinT;
-    float ex = sqrt(rx2 * cos2 + ry2 * sin2);
-    float ey = sqrt(rx2 * sin2 + ry2 * cos2);
+    float ex = fabs(rx * cosT) + fabs(ry * sinT);
+    float ey = fabs(rx * sinT) + fabs(ry * cosT);
 
     int xMin = (int)floor(cx - ex - 1.0f);
     int xMax = (int)ceil(cx + ex + 1.0f);
@@ -282,8 +282,20 @@ __kernel void evaluate_candidates_v4(
         float dy = ((float)y + 0.5f) - cy;
         float xr = dx * cosT + dy * sinT;
         float yr = -dx * sinT + dy * cosT;
-        if (xr * xr * invRX2 + yr * yr * invRY2 > 1.0f) {
-            continue;
+        bool inside = false;
+        if (shapeType == 1) {
+            float invRX2 = 1.0f / (rx * rx);
+            float invRY2 = 1.0f / (ry * ry);
+            inside = (xr * xr * invRX2 + yr * yr * invRY2 <= 1.0f);
+        } else if (shapeType == 2) {
+            if (yr >= -ry && yr <= ry) {
+                float halfWidth = rx * (yr + ry) / (2.0f * ry);
+                inside = (fabs(xr) <= halfWidth);
+            }
+        } else {
+            inside = (fabs(xr) <= rx && fabs(yr) <= ry);
+        }
+        if (!inside) { continue; 
         }
         int p = y * width + x;
         if (opaqueMask[p] == 0) {
@@ -403,7 +415,8 @@ __kernel void apply_candidate_v2(
     const float cr,
     const float cg,
     const float cb,
-    const float ca
+    const float ca,
+    const int shapeType
 ) {
     int lx = get_global_id(0);
     int ly = get_global_id(1);
@@ -424,15 +437,25 @@ __kernel void apply_candidate_v2(
     float theta = thetaDeg * 0.01745329251994329577f;
     float cosT = cos(theta);
     float sinT = sin(theta);
-    float invRX2 = 1.0f / (rx * rx);
-    float invRY2 = 1.0f / (ry * ry);
 
     float dx = ((float)x + 0.5f) - cx;
     float dy = ((float)y + 0.5f) - cy;
     float xr = dx * cosT + dy * sinT;
     float yr = -dx * sinT + dy * cosT;
-    if (xr * xr * invRX2 + yr * yr * invRY2 > 1.0f) {
-        return;
+    bool inside = false;
+    if (shapeType == 1) {
+        float invRX2 = 1.0f / (rx * rx);
+        float invRY2 = 1.0f / (ry * ry);
+        inside = (xr * xr * invRX2 + yr * yr * invRY2 <= 1.0f);
+    } else if (shapeType == 2) {
+        if (yr >= -ry && yr <= ry) {
+            float halfWidth = rx * (yr + ry) / (2.0f * ry);
+            inside = (fabs(xr) <= halfWidth);
+        }
+    } else {
+        inside = (fabs(xr) <= rx && fabs(yr) <= ry);
+    }
+    if (!inside) { return;
     }
 
     float4 src = current[p];

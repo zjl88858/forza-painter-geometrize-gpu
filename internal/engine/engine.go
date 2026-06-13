@@ -123,6 +123,7 @@ func Run(opts Options) error {
 	acceptedShapes := 0
 
 	moveStep, radiusStep := mutationSteps(prepared.Width, prepared.Height)
+	dominantAngles := computeDominantAngles(prepared, 5)
 	hillClimbRounds, mutationsPerRound := planHillClimb(cfg.MutatedSamples)
 
 	resumePath := opts.ResumePath
@@ -184,7 +185,7 @@ func Run(opts Options) error {
 		// fmt.Printf("[%d/%d] Scoring sample step: %d\n",
 		// 	step, cfg.StopAt, evaluator.SampleStep)
 
-		randomCands := randomCandidates(rng, prepared, cfg.RandomSamples, cfg.ForceOpaqueShapes, sampler, progress)
+		randomCands := randomCandidates(rng, prepared, cfg.RandomSamples, cfg.ForceOpaqueShapes, sampler, progress, dominantAngles)
 
 		fmt.Printf("[%d/%d] Evaluating random sample batch on GPU (%d)...\n", step, cfg.StopAt, len(randomCands))
 		best, bestScore, err := submitAndPickBest(evaluator, randomCands, acceptedShapes)
@@ -316,7 +317,11 @@ func Run(opts Options) error {
 					return err
 				}
 				for _, s := range shapes[1:] {
+					shapeType := 0
+					if s.Type == 16 { shapeType = 1 }
+					if s.Type == 2  { shapeType = 2 }
 					cand := model.Candidate{
+						ShapeType: shapeType,
 						X:     float32(s.Data[0]),
 						Y:     float32(s.Data[1]),
 						RX:    float32(s.Data[2]),
@@ -444,6 +449,85 @@ func mutationSteps(width, height int) (move, radius float32) {
 	return move, radius
 }
 
+// computeDominantAngles analyses the gradient orientation of the source image
+// and returns the top N dominant angles in degrees (0-180).
+// These are used to bias random candidates toward angles that naturally
+// occur in the image (e.g. 0/90 for text, diagonal angles for slanted strokes).
+func computeDominantAngles(prepared *imageutil.PreparedImage, topN int) []float32 {
+	w, h := prepared.Width, prepared.Height
+	const bins = 180 // 1 degree per bin
+	hist := make([]float64, bins)
+
+	lum := func(px, py int) float64 {
+		idx := (py*w + px) * 4
+		return 0.299*float64(prepared.Target[idx]) +
+			0.587*float64(prepared.Target[idx+1]) +
+			0.114*float64(prepared.Target[idx+2])
+	}
+
+	for y := 1; y < h-1; y++ {
+		for x := 1; x < w-1; x++ {
+			if prepared.OpaqueMask[y*w+x] == 0 {
+				continue
+			}
+			gx := -lum(x-1, y-1) + lum(x+1, y-1) +
+				-2*lum(x-1, y) + 2*lum(x+1, y) +
+				-lum(x-1, y+1) + lum(x+1, y+1)
+			gy := -lum(x-1, y-1) - 2*lum(x, y-1) - lum(x+1, y-1) +
+				lum(x-1, y+1) + 2*lum(x, y+1) + lum(x+1, y+1)
+			mag := math.Sqrt(gx*gx + gy*gy)
+			if mag < 0.05 {
+				continue
+			}
+			angle := math.Atan2(gy, gx) * 180.0 / math.Pi
+			if angle < 0 {
+				angle += 180
+			}
+			hist[int(angle)%bins] += mag
+		}
+	}
+
+	// Smooth histogram with 5-bin window
+	smoothed := make([]float64, bins)
+	for i := 0; i < bins; i++ {
+		sum := 0.0
+		for d := -2; d <= 2; d++ {
+			sum += hist[(i+d+bins)%bins]
+		}
+		smoothed[i] = sum / 5.0
+	}
+
+	// Greedily pick top N peaks, suppressing ±15° around each
+	used := make([]bool, bins)
+	result := make([]float32, 0, topN)
+	for len(result) < topN {
+		bestBin, bestVal := -1, -1.0
+		for i := 0; i < bins; i++ {
+			if !used[i] && smoothed[i] > bestVal {
+				bestVal = smoothed[i]
+				bestBin = i
+			}
+		}
+		if bestBin < 0 || bestVal <= 0 {
+			break
+		}
+		result = append(result, float32(bestBin))
+		for d := -15; d <= 15; d++ {
+			used[(bestBin+d+bins)%bins] = true
+		}
+	}
+
+	if len(result) > 0 {
+		fmt.Printf("Dominant angles detected: ")
+		for _, a := range result {
+			fmt.Printf("%.0f° ", a)
+		}
+		fmt.Println()
+	}
+
+	return result
+}
+
 // errorSampler converts the GPU-produced error histogram into a CDF that
 // can be sampled in O(log n) per draw. It is rebuilt every accepted shape.
 type errorSampler struct {
@@ -520,7 +604,7 @@ func (s *errorSampler) sample(rng *rand.Rand) (float32, float32) {
 // angle) is randomized; color is left zero because the GPU evaluator
 // computes the optimal color analytically and writes it back in the
 // EvalResult.
-func randomCandidates(rng *rand.Rand, prepared *imageutil.PreparedImage, count int, forceOpaque bool, sampler *errorSampler, progress float32) []model.Candidate {
+func randomCandidates(rng *rand.Rand, prepared *imageutil.PreparedImage, count int, forceOpaque bool, sampler *errorSampler, progress float32, dominantAngles []float32) []model.Candidate {
 	out := make([]model.Candidate, 0, count)
 	w := float32(prepared.Width)
 	h := float32(prepared.Height)
@@ -563,7 +647,22 @@ func randomCandidates(rng *rand.Rand, prepared *imageutil.PreparedImage, count i
 			Y:     y,
 			RX:    snapToValidRX(randRange(rng, minRadius, maxRadius)),
 			RY:    snapToValidRX(randRange(rng, minRadius, maxRadius)),
-			Theta: rng.Float32() * 360,
+			Theta: func() float32 {
+    			if len(dominantAngles) > 0 && rng.Float32() < 0.15 {
+       				base := dominantAngles[rng.Intn(len(dominantAngles))]
+        			return base + randRange(rng, -5, 5)
+    			}
+    			return rng.Float32() * 360
+			}(),
+			ShapeType: func() int {
+				r := rng.Float32()
+				if r < 0.40 {
+					return 0 // rectangle
+				} else if r < 0.80 {
+					return 1 // circle
+				}
+				return 2 // triangle
+			}(),
 			A:     alpha,
 		})
 	}
@@ -615,6 +714,7 @@ func mutatedCandidates(rng *rand.Rand, prepared *imageutil.PreparedImage, base m
 		if forceOpaque {
 			cand.A = 1.0
 		}
+		// ShapeType preserved from base via cand := base
 		out = append(out, cand)
 	}
 	if len(out) == 0 {
@@ -691,8 +791,16 @@ func toShape(c model.Candidate, score float64) model.Shape {
 	if angle == 0 && c.Theta > 359.5 {
 		angle = 360
 	}
+	// Map internal ShapeType to Forza JSON type:
+	// 0=rectangle, 1=circle, 2=triangle
+	jsonType := 0
+	if c.ShapeType == 1 {
+		jsonType = 16 // circle uses type 16 in JSON
+	} else if c.ShapeType == 2 {
+		jsonType = 2 // triangle placeholder (mapped to correct byte in converter)
+	}
 	return model.Shape{
-		Type: 16,
+		Type: jsonType,
 		Data: []float64{
 			float64(c.X),
 			float64(c.Y),
@@ -898,8 +1006,8 @@ func pruneOccludedShapes(shapes []model.Shape, width, height int, opaqueMask []u
 
 	for j := len(shapes) - 1; j >= 1; j-- {
 		s := shapes[j]
-		if s.Type != 16 {
-			// If it's not a rotated ellipse, we just keep it.
+		if s.Type != 0 && s.Type != 16 && s.Type != 2 {
+			// Unknown type - keep it
 			keep[j] = true
 			continue
 		}
@@ -921,8 +1029,6 @@ func pruneOccludedShapes(shapes []model.Shape, width, height int, opaqueMask []u
 		t := theta * (math.Pi / 180.0)
 		cosT := float32(math.Cos(float64(t)))
 		sinT := float32(math.Sin(float64(t)))
-		invRX2 := float32(1.0) / (rx * rx)
-		invRY2 := float32(1.0) / (ry * ry)
 
 		xMin := clampInt(int(cx-rx-1), 0, width-1)
 		xMax := clampInt(int(cx+rx+1), 0, width-1)
@@ -944,7 +1050,21 @@ func pruneOccludedShapes(shapes []model.Shape, width, height int, opaqueMask []u
 				dy := float32(y) + 0.5 - cy
 				xr := dx*cosT + dy*sinT
 				yr := -dx*sinT + dy*cosT
-				if xr*xr*invRX2+yr*yr*invRY2 <= 1.0 {
+				// inside test based on shape type
+				var pixelInside bool
+				if s.Type == 16 {
+					invRX2 := float32(1.0) / (rx * rx)
+					invRY2 := float32(1.0) / (ry * ry)
+					pixelInside = xr*xr*invRX2+yr*yr*invRY2 <= 1.0
+				} else if s.Type == 2 {
+					if yr >= -ry && yr <= ry {
+						halfWidth := rx * (yr + ry) / (2.0 * ry)
+						pixelInside = float32(math.Abs(float64(xr))) <= halfWidth
+					}
+				} else {
+					pixelInside = float32(math.Abs(float64(xr))) <= rx && float32(math.Abs(float64(yr))) <= ry
+				}
+				if pixelInside {
 					hasOpaquePixelsInsideMask = true
 					if cov[p] == 0 {
 						// This pixel of the ellipse is visible (not covered by any subsequent opaque shape)
@@ -980,7 +1100,21 @@ func pruneOccludedShapes(shapes []model.Shape, width, height int, opaqueMask []u
 						dy := float32(y) + 0.5 - cy
 						xr := dx*cosT + dy*sinT
 						yr := -dx*sinT + dy*cosT
-						if xr*xr*invRX2+yr*yr*invRY2 <= 1.0 {
+						// inside test based on shape type
+				var pixelInside bool
+				if s.Type == 16 {
+					invRX2 := float32(1.0) / (rx * rx)
+					invRY2 := float32(1.0) / (ry * ry)
+					pixelInside = xr*xr*invRX2+yr*yr*invRY2 <= 1.0
+				} else if s.Type == 2 {
+					if yr >= -ry && yr <= ry {
+						halfWidth := rx * (yr + ry) / (2.0 * ry)
+						pixelInside = float32(math.Abs(float64(xr))) <= halfWidth
+					}
+				} else {
+					pixelInside = float32(math.Abs(float64(xr))) <= rx && float32(math.Abs(float64(yr))) <= ry
+				}
+				if pixelInside {
 							cov[p] = 1
 						}
 					}

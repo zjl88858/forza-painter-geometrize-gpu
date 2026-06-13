@@ -986,15 +986,16 @@ func (v *vulkanBackend) SubmitEval(cands []model.Candidate) (EvalTicket, error) 
 			return EvalTicket{}, err
 		}
 	}
-	dst := unsafe.Slice((*float32)(v.candMapped[slot]), count*6)
+	dst := unsafe.Slice((*float32)(v.candMapped[slot]), count*7)
 	for i, c := range cands {
-		base := i * 6
+		base := i * 7
 		dst[base+0] = c.X
 		dst[base+1] = c.Y
 		dst[base+2] = c.RX
 		dst[base+3] = c.RY
 		dst[base+4] = c.Theta
 		dst[base+5] = c.A
+		dst[base+6] = float32(c.ShapeType)
 	}
 
 	if err := v.resetFence(slot); err != nil {
@@ -1106,12 +1107,8 @@ func (v *vulkanBackend) SubmitApply(candidate model.Candidate) error {
 	theta := float64(candidate.Theta) * (math.Pi / 180.0)
 	cosT := math.Cos(theta)
 	sinT := math.Sin(theta)
-	rx2 := float64(rx) * float64(rx)
-	ry2 := float64(ry) * float64(ry)
-	cos2 := cosT * cosT
-	sin2 := sinT * sinT
-	ex := math.Sqrt(rx2*cos2 + ry2*sin2)
-	ey := math.Sqrt(rx2*sin2 + ry2*cos2)
+	ex := math.Abs(float64(rx)*cosT) + math.Abs(float64(ry)*sinT)
+	ey := math.Abs(float64(rx)*sinT) + math.Abs(float64(ry)*cosT)
 
 	xMin := int(math.Floor(float64(candidate.X) - ex - 1.0))
 	xMax := int(math.Ceil(float64(candidate.X) + ex + 1.0))
@@ -1978,12 +1975,14 @@ func (v *vulkanBackend) bindApplyArgs(cmdBuf vkCommandBuffer, slot, xMin, yMin, 
 		CX, CY, RXRaw, RYRaw   float32
 		ThetaDeg               float32
 		CR, CG, CB, CA         float32
+		ShapeType              int32
 	}
 	pc := applyPC{
 		Width: int32(v.width), Height: int32(v.height),
 		XMin: int32(xMin), YMin: int32(yMin), XMax: int32(xMax), YMax: int32(yMax),
 		CX: candidate.X, CY: candidate.Y, RXRaw: candidate.RX, RYRaw: candidate.RY,
 		ThetaDeg: candidate.Theta, CR: candidate.R, CG: candidate.G, CB: candidate.B, CA: candidate.A,
+		ShapeType: int32(candidate.ShapeType),
 	}
 	C.rawVkCmdPushConstants(cmdBuf, v.applyLayout, C.VK_SHADER_STAGE_COMPUTE_BIT, 0, C.uint32_t(unsafe.Sizeof(pc)), unsafe.Pointer(&pc))
 	return nil

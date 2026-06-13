@@ -267,7 +267,7 @@ func NewEvaluator(target, current []float32, mask []uint8, width, height, maxCan
 	}
 
 	for i := 0; i < ringSize; i++ {
-		buf, bErr := ctx.CreateEmptyBuffer(cl.MemReadOnly, maxCandidates*6*4)
+		buf, bErr := ctx.CreateEmptyBuffer(cl.MemReadOnly, maxCandidates*7*4)
 		if bErr != nil {
 			cleanup()
 			return nil, bErr
@@ -286,7 +286,7 @@ func NewEvaluator(target, current []float32, mask []uint8, width, height, maxCan
 		}
 		e.errorGridBufs[i] = gbuf
 
-		e.hostCands[i] = make([]float32, maxCandidates*6)
+		e.hostCands[i] = make([]float32, maxCandidates*7)
 		e.hostResults[i] = make([]float32, maxCandidates*4)
 		e.hostErrorGrids[i] = make([]float32, gridW*gridH)
 	}
@@ -419,15 +419,16 @@ func (e *Evaluator) SubmitEval(cands []model.Candidate) (EvalTicket, error) {
 		}
 	}
 
-	packed := e.hostCands[slot][:count*6]
+	packed := e.hostCands[slot][:count*7]
 	for i, c := range cands {
-		base := i * 6
-		packed[base+0] = c.X
-		packed[base+1] = c.Y
-		packed[base+2] = c.RX
-		packed[base+3] = c.RY
-		packed[base+4] = c.Theta
-		packed[base+5] = c.A
+	    base := i * 7
+	    packed[base+0] = c.X
+	    packed[base+1] = c.Y
+	    packed[base+2] = c.RX
+	    packed[base+3] = c.RY
+	    packed[base+4] = c.Theta
+	    packed[base+5] = c.A
+	    packed[base+6] = float32(c.ShapeType)
 	}
 
 	// Non-blocking write. The OpenCL spec snapshots the host pointer's
@@ -547,21 +548,13 @@ func (e *Evaluator) Evaluate(cands []model.Candidate) ([]EvalResult, error) {
 func (e *Evaluator) SubmitApply(candidate model.Candidate) error {
 	rx := candidate.RX
 	ry := candidate.RY
-	if rx < 1 {
-		rx = 1
-	}
-	if ry < 1 {
-		ry = 1
-	}
+	if rx < 1 { rx = 1 }
+	if ry < 1 { ry = 1 }
 	theta := float64(candidate.Theta) * (math.Pi / 180.0)
 	cosT := math.Cos(theta)
 	sinT := math.Sin(theta)
-	rx2 := float64(rx) * float64(rx)
-	ry2 := float64(ry) * float64(ry)
-	cos2 := cosT * cosT
-	sin2 := sinT * sinT
-	ex := math.Sqrt(rx2*cos2 + ry2*sin2)
-	ey := math.Sqrt(rx2*sin2 + ry2*cos2)
+	ex := math.Abs(float64(rx)*cosT) + math.Abs(float64(ry)*sinT)
+	ey := math.Abs(float64(rx)*sinT) + math.Abs(float64(ry)*cosT)
 
 	xMin := int(math.Floor(float64(candidate.X) - ex - 1.0))
 	xMax := int(math.Ceil(float64(candidate.X) + ex + 1.0))
@@ -604,6 +597,7 @@ func (e *Evaluator) SubmitApply(candidate model.Candidate) error {
 		candidate.G,
 		candidate.B,
 		candidate.A,
+		int32(candidate.ShapeType),
 	); err != nil {
 		return err
 	}
