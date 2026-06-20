@@ -32,6 +32,7 @@ func DefaultSettings() model.Settings {
 		ProgressiveSamplingTransition: 0.333,
 		ProgressiveSamplingCurve:      2.5,
 		ErrorGridSize:                 64,
+		ErrorMetric:                   "mse",
 	}
 }
 
@@ -128,6 +129,8 @@ func ParseSettings(path string) (model.Settings, error) {
 			cfg.ErrorGridSize = parseInt(value, cfg.ErrorGridSize)
 		case "loadGeometry":
 			cfg.LoadGeometry = value
+		case "errorMetric":
+			cfg.ErrorMetric = strings.ToLower(strings.TrimSpace(value))
 		}
 	}
 	if err := scanner.Err(); err != nil {

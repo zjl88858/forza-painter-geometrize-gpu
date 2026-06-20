@@ -63,6 +63,8 @@ type Backend interface {
 	Close() error
 	SetUseWorkGroupEval(bool)
 	SetSampleStep(int)
+	SetErrorMetric(string)
+	SubmitSsimMap() (GridTicket, error)
 }
 
 // NewBackend creates the appropriate GPU backend based on name.

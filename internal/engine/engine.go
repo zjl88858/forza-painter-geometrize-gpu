@@ -111,7 +111,14 @@ func Run(opts Options) error {
 	// 	return err
 	// }
 	evaluator.SetUseWorkGroupEval(cfg.UseWorkGroupEval)
+	evaluator.SetErrorMetric(cfg.ErrorMetric)
 	defer evaluator.Close()
+
+	if cfg.ErrorMetric == "ssim" {
+		fmt.Println("Error metric: SSIM (MSE/SSIM blended scoring)")
+	} else {
+		fmt.Println("Error metric: MSE")
+	}
 
 	fmt.Printf("Backend: %s\n", resolveBackendName(opts.Backend))
 
@@ -151,7 +158,8 @@ func Run(opts Options) error {
 		return err
 	}
 	sampler := newErrorSampler(initialGrid, gw, gh, prepared.Width, prepared.Height)
-	var pendingGrid gpu.GridTicket // not valid initially
+	var pendingGrid gpu.GridTicket    // not valid initially
+	var pendingSsimMap gpu.GridTicket // only used when errorMetric == "ssim"
 
 	fmt.Printf("Loaded image: %s (%dx%d), transparency=%v\n", opts.ImagePath, prepared.Width, prepared.Height, prepared.HasTransparency)
 	fmt.Printf("Settings: stopAt=%d randomSamples=%d mutatedSamples=%d saveAt=%d saveEvery(preview)=%d\n",
@@ -358,6 +366,16 @@ func Run(opts Options) error {
 			pendingGrid = gpu.GridTicket{}
 		}
 
+		// Consume the previous shape's SSIM map (also 1-shape stale,
+		// same as the error grid). The read is non-blocking at this
+		// point because it was submitted after the previous apply.
+		if pendingSsimMap.Valid() {
+			if _, _, _, sErr := evaluator.WaitErrorGrid(pendingSsimMap); sErr != nil {
+				return sErr
+			}
+			pendingSsimMap = gpu.GridTicket{}
+		}
+
 		// Submit the grid kernel for the canvas-just-applied. It's
 		// queued behind the apply; we'll consume the result next
 		// iteration.
@@ -366,6 +384,15 @@ func Run(opts Options) error {
 			return gErr
 		}
 		pendingGrid = newTicket
+
+		// Submit SSIM map recompute (queued behind apply + error grid).
+		if cfg.ErrorMetric == "ssim" {
+			ssimTicket, sErr := evaluator.SubmitSsimMap()
+			if sErr != nil {
+				return sErr
+			}
+			pendingSsimMap = ssimTicket
+		}
 
 		fmt.Printf("[%d/%d] Step completed in %s\n", acceptedShapes, cfg.StopAt, time.Since(stepStart).Round(time.Millisecond))
 	}
@@ -380,6 +407,14 @@ func Run(opts Options) error {
 			return err
 		}
 		pendingGrid = gpu.GridTicket{}
+	}
+
+	// Drain any pending SSIM map ticket.
+	if pendingSsimMap.Valid() {
+		if _, _, _, err := evaluator.WaitErrorGrid(pendingSsimMap); err != nil {
+			return err
+		}
+		pendingSsimMap = gpu.GridTicket{}
 	}
 
 	if err := output.SaveGeometry(output.BuildFinalOutputPath(resolveOutputBase(opts)), shapes); err != nil {
