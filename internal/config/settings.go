@@ -19,6 +19,7 @@ func DefaultSettings() model.Settings {
 		MaxThreads:                    0,
 		MutatedSamples:                1000,
 		ForceOpaqueShapes:             false,
+		EnableMultiPrimitiveShapes:    false,
 		PosterizeLevels:               20,
 		PreviewEvery:                  10,
 		RandomSamples:                 3000,
@@ -98,6 +99,8 @@ func ParseSettings(path string) (model.Settings, error) {
 			cfg.MutatedSamples = parseInt(value, cfg.MutatedSamples)
 		case "forceOpaqueShapes":
 			cfg.ForceOpaqueShapes = parseBool(value, cfg.ForceOpaqueShapes)
+		case "enableMultiPrimitiveShapes":
+			cfg.EnableMultiPrimitiveShapes = parseBool(value, cfg.EnableMultiPrimitiveShapes)
 		case "posterizeLevels":
 			cfg.PosterizeLevels = parseInt(value, cfg.PosterizeLevels)
 		case "previewEvery":

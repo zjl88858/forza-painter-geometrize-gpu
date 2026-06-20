@@ -7,6 +7,7 @@ type Settings struct {
 	MaxThreads                    int
 	MutatedSamples                int
 	ForceOpaqueShapes             bool
+	EnableMultiPrimitiveShapes    bool
 	PosterizeLevels               int
 	PreviewEvery                  int
 	RandomSamples                 int
@@ -37,13 +38,14 @@ type Geometry struct {
 }
 
 type Candidate struct {
-	X     float32
-	Y     float32
-	RX    float32
-	RY    float32
-	Theta float32
-	R     float32
-	G     float32
-	B     float32
-	A     float32
+	ShapeType int
+	X         float32
+	Y         float32
+	RX        float32
+	RY        float32
+	Theta     float32
+	R         float32
+	G         float32
+	B         float32
+	A         float32
 }

@@ -11,7 +11,7 @@ import (
 )
 
 func main() {
-	fmt.Println("Version: v1.2-Canary-20260527")
+	fmt.Println("Version: v1.2-Canary-20260613")
 	settingsPath := flag.String("settings", "", "Path to settings ini file")
 	profile := flag.String("profile", "", "Profile name fragment under ./settings")
 	outputPath := flag.String("output", "", "Output path prefix (default: input image path)")

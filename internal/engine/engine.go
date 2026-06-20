@@ -138,7 +138,7 @@ func Run(opts Options) error {
 		resumePath = cfg.LoadGeometry
 	}
 	if resumePath != "" {
-		restoredShapes, restoredCount, resumeErr := restoreCheckpoint(resumePath, prepared, cfg.ForceOpaqueShapes, evaluator)
+		restoredShapes, restoredCount, resumeErr := restoreCheckpoint(resumePath, prepared, cfg.ForceOpaqueShapes, cfg.EnableMultiPrimitiveShapes, evaluator)
 		if resumeErr != nil {
 			return resumeErr
 		}
@@ -192,7 +192,7 @@ func Run(opts Options) error {
 		// fmt.Printf("[%d/%d] Scoring sample step: %d\n",
 		// 	step, cfg.StopAt, evaluator.SampleStep)
 
-		randomCands := randomCandidates(rng, prepared, cfg.RandomSamples, cfg.ForceOpaqueShapes, sampler, progress)
+		randomCands := randomCandidates(rng, prepared, cfg.RandomSamples, cfg.ForceOpaqueShapes, cfg.EnableMultiPrimitiveShapes, sampler, progress)
 
 		fmt.Printf("[%d/%d] Evaluating random sample batch on GPU (%d)...\n", step, cfg.StopAt, len(randomCands))
 		best, bestScore, err := submitAndPickBest(evaluator, randomCands, acceptedShapes)
@@ -204,7 +204,7 @@ func Run(opts Options) error {
 		if hillClimbRounds > 0 && mutationsPerRound > 0 && bestScore < 0 {
 			improved := 0
 			for round := 0; round < hillClimbRounds; round++ {
-				mutations := mutatedCandidates(rng, prepared, best, mutationsPerRound, cfg.ForceOpaqueShapes, moveStep, radiusStep)
+				mutations := mutatedCandidates(rng, prepared, best, mutationsPerRound, cfg.ForceOpaqueShapes, cfg.EnableMultiPrimitiveShapes, moveStep, radiusStep)
 				roundBest, roundScore, mutErr := submitAndPickBest(evaluator, mutations, acceptedShapes)
 				if mutErr != nil {
 					return mutErr
@@ -236,7 +236,7 @@ func Run(opts Options) error {
 
 		// Re-evaluate the final integer-quantized candidate so the applied
 		// canvas and score bookkeeping match the exported geometry.
-		final := quantizeCandidate(best, prepared.Width, prepared.Height, cfg.ForceOpaqueShapes)
+		final := quantizeCandidate(best, prepared.Width, prepared.Height, cfg.ForceOpaqueShapes, cfg.EnableMultiPrimitiveShapes)
 		final, finalScore, err := submitAndPickBest(evaluator, []model.Candidate{final}, acceptedShapes)
 		if err != nil {
 			return err
@@ -261,7 +261,7 @@ func Run(opts Options) error {
 		if currentError < 0 {
 			currentError = 0
 		}
-		shapes = append(shapes, toShape(final, normalizeScore(currentError, denom)))
+		shapes = append(shapes, toShape(final, normalizeScore(currentError, denom), cfg.EnableMultiPrimitiveShapes))
 		acceptedShapes++
 		fmt.Printf("[%d/%d] Added rotated ellipse #%d (delta %.6f)\n", acceptedShapes, cfg.StopAt, len(shapes)-1, finalScore)
 
@@ -325,15 +325,16 @@ func Run(opts Options) error {
 				}
 				for _, s := range shapes[1:] {
 					cand := model.Candidate{
-						X:     float32(s.Data[0]),
-						Y:     float32(s.Data[1]),
-						RX:    float32(s.Data[2]),
-						RY:    float32(s.Data[3]),
-						Theta: float32(s.Data[4]),
-						R:     float32(s.Color[0]) / 255.0,
-						G:     float32(s.Color[1]) / 255.0,
-						B:     float32(s.Color[2]) / 255.0,
-						A:     float32(s.Color[3]) / 255.0,
+						ShapeType: candidateShapeType(s.Type, cfg.EnableMultiPrimitiveShapes),
+						X:         float32(s.Data[0]),
+						Y:         float32(s.Data[1]),
+						RX:        float32(s.Data[2]),
+						RY:        float32(s.Data[3]),
+						Theta:     float32(s.Data[4]),
+						R:         float32(s.Color[0]) / 255.0,
+						G:         float32(s.Color[1]) / 255.0,
+						B:         float32(s.Color[2]) / 255.0,
+						A:         float32(s.Color[3]) / 255.0,
 					}
 					if err := evaluator.SubmitApply(cand); err != nil {
 						return err
@@ -536,7 +537,7 @@ func (s *errorSampler) sample(rng *rand.Rand) (float32, float32) {
 // angle) is randomized; color is left zero because the GPU evaluator
 // computes the optimal color analytically and writes it back in the
 // EvalResult.
-func randomCandidates(rng *rand.Rand, prepared *imageutil.PreparedImage, count int, forceOpaque bool, sampler *errorSampler, progress float32) []model.Candidate {
+func randomCandidates(rng *rand.Rand, prepared *imageutil.PreparedImage, count int, forceOpaque, enableMultiPrimitive bool, sampler *errorSampler, progress float32) []model.Candidate {
 	out := make([]model.Candidate, 0, count)
 	w := float32(prepared.Width)
 	h := float32(prepared.Height)
@@ -575,22 +576,24 @@ func randomCandidates(rng *rand.Rand, prepared *imageutil.PreparedImage, count i
 			alpha = randRange(rng, 0.3, 1.0)
 		}
 		out = append(out, model.Candidate{
-			X:     x,
-			Y:     y,
-			RX:    snapToValidRX(randRange(rng, minRadius, maxRadius)),
-			RY:    snapToValidRX(randRange(rng, minRadius, maxRadius)),
-			Theta: rng.Float32() * 360,
-			A:     alpha,
+			ShapeType: randomShapeType(rng, enableMultiPrimitive),
+			X:         x,
+			Y:         y,
+			RX:        snapToValidRX(randRange(rng, minRadius, maxRadius)),
+			RY:        snapToValidRX(randRange(rng, minRadius, maxRadius)),
+			Theta:     rng.Float32() * 360,
+			A:         alpha,
 		})
 	}
 	if len(out) == 0 {
 		out = append(out, model.Candidate{
-			X:     w * 0.5,
-			Y:     h * 0.5,
-			RX:    snapToValidRX(maxRadius * 0.25),
-			RY:    snapToValidRX(maxRadius * 0.25),
-			Theta: 0,
-			A:     1.0,
+			ShapeType: 1,
+			X:         w * 0.5,
+			Y:         h * 0.5,
+			RX:        snapToValidRX(maxRadius * 0.25),
+			RY:        snapToValidRX(maxRadius * 0.25),
+			Theta:     0,
+			A:         1.0,
 		})
 	}
 	return out
@@ -599,12 +602,15 @@ func randomCandidates(rng *rand.Rand, prepared *imageutil.PreparedImage, count i
 // mutatedCandidates only perturbs geometry. Colors are recomputed by the
 // GPU on each evaluation, so seeding them on the CPU side would be wasted
 // work (and would constrain the search).
-func mutatedCandidates(rng *rand.Rand, prepared *imageutil.PreparedImage, base model.Candidate, count int, forceOpaque bool, moveStep, radiusStep float32) []model.Candidate {
+func mutatedCandidates(rng *rand.Rand, prepared *imageutil.PreparedImage, base model.Candidate, count int, forceOpaque, enableMultiPrimitive bool, moveStep, radiusStep float32) []model.Candidate {
 	out := make([]model.Candidate, 0, count)
 	w := float32(prepared.Width)
 	h := float32(prepared.Height)
 	for i := 0; i < count; i++ {
 		cand := base
+		if !enableMultiPrimitive {
+			cand.ShapeType = 1
+		}
 		cand.X += randRange(rng, -moveStep, moveStep)
 		cand.Y += randRange(rng, -moveStep, moveStep)
 		if cand.X < 0 {
@@ -699,7 +705,7 @@ func isRejectedEvalScore(score float32) bool {
 	return score >= float32(math.MaxFloat32)*0.5
 }
 
-func toShape(c model.Candidate, score float64) model.Shape {
+func toShape(c model.Candidate, score float64, enableMultiPrimitive bool) model.Shape {
 	angle := int(math.Round(float64(c.Theta))) % 360
 	if angle < 0 {
 		angle += 360
@@ -708,7 +714,7 @@ func toShape(c model.Candidate, score float64) model.Shape {
 		angle = 360
 	}
 	return model.Shape{
-		Type: 16,
+		Type: shapeJSONType(c.ShapeType, enableMultiPrimitive),
 		Data: []float64{
 			float64(c.X),
 			float64(c.Y),
@@ -825,7 +831,7 @@ func normalizeScore(totalError, denom float64) float64 {
 
 // quantizeCandidate rounds geometry to the integer grid used by the
 // downstream importer and keeps colours in 8-bit space.
-func quantizeCandidate(c model.Candidate, width, height int, forceOpaque bool) model.Candidate {
+func quantizeCandidate(c model.Candidate, width, height int, forceOpaque, enableMultiPrimitive bool) model.Candidate {
 	c.X = float32(clampInt(int(math.Round(float64(c.X))), 0, maxInt(0, width-1)))
 	c.Y = float32(clampInt(int(math.Round(float64(c.Y))), 0, maxInt(0, height-1)))
 	c.RX = snapToValidRX(c.RX)
@@ -843,11 +849,71 @@ func quantizeCandidate(c model.Candidate, width, height int, forceOpaque bool) m
 	if forceOpaque {
 		c.A = 1.0
 	}
+	if !enableMultiPrimitive {
+		c.ShapeType = 1
+	}
 	c.R = float32(f32ToByte(c.R)) / 255.0
 	c.G = float32(f32ToByte(c.G)) / 255.0
 	c.B = float32(f32ToByte(c.B)) / 255.0
 	c.A = float32(f32ToByte(c.A)) / 255.0
 	return c
+}
+
+func randomShapeType(rng *rand.Rand, enableMultiPrimitive bool) int {
+	if !enableMultiPrimitive {
+		return 1
+	}
+	r := rng.Float32()
+	if r < 0.40 {
+		return 0
+	}
+	if r < 0.80 {
+		return 1
+	}
+	return 2
+}
+
+func shapeJSONType(shapeType int, enableMultiPrimitive bool) int {
+	if !enableMultiPrimitive {
+		return 16
+	}
+	switch shapeType {
+	case 0:
+		return 0
+	case 2:
+		return 2
+	default:
+		return 16
+	}
+}
+
+func candidateShapeType(jsonType int, enableMultiPrimitive bool) int {
+	if !enableMultiPrimitive {
+		return 1
+	}
+	switch jsonType {
+	case 0:
+		return 0
+	case 2:
+		return 2
+	default:
+		return 1
+	}
+}
+
+func shapeContainsPoint(shapeType int, xr, yr, rx, ry, invRX2, invRY2 float32) bool {
+	switch shapeType {
+	case 0:
+		return float32(math.Abs(float64(xr))) <= rx && float32(math.Abs(float64(yr))) <= ry
+	case 2:
+		if yr < -ry || yr > ry {
+			return false
+		}
+		halfWidth := rx * (yr + ry) / (2.0 * ry)
+		return float32(math.Abs(float64(xr))) <= halfWidth
+	default:
+		return xr*xr*invRX2+yr*yr*invRY2 <= 1.0
+	}
 }
 
 func clampInt(v, minV, maxV int) int {
@@ -903,19 +969,13 @@ func pruneOccludedShapes(shapes []model.Shape, width, height int, opaqueMask []u
 		return shapes
 	}
 
-	// cov keeps track of pixels that are covered by 100% opaque shapes.
-	// 0: not covered, 1: covered by an opaque shape
 	cov := make([]uint8, width*height)
-
-	// We iterate from the last shape down to the first shape (index 1).
-	// Background shape at index 0 is always kept.
 	keep := make([]bool, len(shapes))
-	keep[0] = true // background shape is always kept
+	keep[0] = true
 
 	for j := len(shapes) - 1; j >= 1; j-- {
 		s := shapes[j]
-		if s.Type != 16 {
-			// If it's not a rotated ellipse, we just keep it.
+		if s.Type != 0 && s.Type != 2 && s.Type != 16 {
 			keep[j] = true
 			continue
 		}
@@ -925,7 +985,7 @@ func pruneOccludedShapes(shapes []model.Shape, width, height int, opaqueMask []u
 		rx := float32(s.Data[2])
 		ry := float32(s.Data[3])
 		theta := float32(s.Data[4])
-		alpha := s.Color[3] // 0-255
+		alpha := s.Color[3]
 
 		if rx < 1 {
 			rx = 1
@@ -945,7 +1005,6 @@ func pruneOccludedShapes(shapes []model.Shape, width, height int, opaqueMask []u
 		yMin := clampInt(int(cy-ry-1), 0, height-1)
 		yMax := clampInt(int(cy+ry+1), 0, height-1)
 
-		// Check if this shape is completely occluded by already-drawn opaque shapes
 		isOccluded := true
 		hasOpaquePixelsInsideMask := false
 
@@ -960,10 +1019,9 @@ func pruneOccludedShapes(shapes []model.Shape, width, height int, opaqueMask []u
 				dy := float32(y) + 0.5 - cy
 				xr := dx*cosT + dy*sinT
 				yr := -dx*sinT + dy*cosT
-				if xr*xr*invRX2+yr*yr*invRY2 <= 1.0 {
+				if shapeContainsPoint(s.Type, xr, yr, rx, ry, invRX2, invRY2) {
 					hasOpaquePixelsInsideMask = true
 					if cov[p] == 0 {
-						// This pixel of the ellipse is visible (not covered by any subsequent opaque shape)
 						isOccluded = false
 						break
 					}
@@ -974,17 +1032,14 @@ func pruneOccludedShapes(shapes []model.Shape, width, height int, opaqueMask []u
 			}
 		}
 
-		// If the shape covers no pixels inside the opaque mask, we can treat it as occluded/useless.
 		if !hasOpaquePixelsInsideMask {
 			isOccluded = true
 		}
 
 		if isOccluded {
-			// This shape is completely covered, we don't keep it!
 			keep[j] = false
 		} else {
 			keep[j] = true
-			// If this shape is 100% opaque, mark all its pixels as covered in the cov mask
 			if alpha == 255 {
 				for y := yMin; y <= yMax; y++ {
 					for x := xMin; x <= xMax; x++ {
@@ -996,7 +1051,7 @@ func pruneOccludedShapes(shapes []model.Shape, width, height int, opaqueMask []u
 						dy := float32(y) + 0.5 - cy
 						xr := dx*cosT + dy*sinT
 						yr := -dx*sinT + dy*cosT
-						if xr*xr*invRX2+yr*yr*invRY2 <= 1.0 {
+						if shapeContainsPoint(s.Type, xr, yr, rx, ry, invRX2, invRY2) {
 							cov[p] = 1
 						}
 					}
@@ -1005,7 +1060,6 @@ func pruneOccludedShapes(shapes []model.Shape, width, height int, opaqueMask []u
 		}
 	}
 
-	// Rebuild the shapes list
 	pruned := make([]model.Shape, 0, len(shapes))
 	for j, k := range keep {
 		if k {

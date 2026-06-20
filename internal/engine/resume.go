@@ -10,7 +10,7 @@ import (
 	"forza-painter-geometrize-go/internal/model"
 )
 
-func restoreCheckpoint(path string, prepared *imageutil.PreparedImage, forceOpaque bool, evaluator gpu.Backend) ([]model.Shape, int, error) {
+func restoreCheckpoint(path string, prepared *imageutil.PreparedImage, forceOpaque, enableMultiPrimitive bool, evaluator gpu.Backend) ([]model.Shape, int, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, 0, fmt.Errorf("read checkpoint: %w", err)
@@ -32,19 +32,19 @@ func restoreCheckpoint(path string, prepared *imageutil.PreparedImage, forceOpaq
 		if index == 0 && looksLikeBackground(shape) {
 			continue
 		}
-		candidate, ok := shapeToCandidate(shape)
+		candidate, ok := shapeToCandidate(shape, enableMultiPrimitive)
 		if !ok {
 			continue
 		}
-		final := quantizeCandidate(candidate, prepared.Width, prepared.Height, forceOpaque)
+		final := quantizeCandidate(candidate, prepared.Width, prepared.Height, forceOpaque, enableMultiPrimitive)
 		if err := evaluator.SubmitApply(final); err != nil {
 			return nil, 0, err
 		}
-		shapes = append(shapes, toShape(final, shape.Score))
+		shapes = append(shapes, toShape(final, shape.Score, enableMultiPrimitive))
 		restored++
 	}
 	if restored == 0 {
-		return nil, 0, fmt.Errorf("checkpoint has no drawable rotated ellipses to restore")
+		return nil, 0, fmt.Errorf("checkpoint has no drawable shapes to restore")
 	}
 	if err := evaluator.Flush(); err != nil {
 		return nil, 0, err
@@ -62,19 +62,21 @@ func looksLikeBackground(shape model.Shape) bool {
 	return shape.Data[2] >= 1 && shape.Data[3] >= 1
 }
 
-func shapeToCandidate(shape model.Shape) (model.Candidate, bool) {
-	if shape.Type != 16 || len(shape.Data) < 5 || len(shape.Color) < 4 {
+func shapeToCandidate(shape model.Shape, enableMultiPrimitive bool) (model.Candidate, bool) {
+	if len(shape.Data) < 5 || len(shape.Color) < 4 {
 		return model.Candidate{}, false
 	}
+	shapeType := candidateShapeType(shape.Type, enableMultiPrimitive)
 	return model.Candidate{
-		X:     float32(shape.Data[0]),
-		Y:     float32(shape.Data[1]),
-		RX:    float32(shape.Data[2]),
-		RY:    float32(shape.Data[3]),
-		Theta: float32(shape.Data[4]),
-		R:     float32(shape.Color[0]) / 255,
-		G:     float32(shape.Color[1]) / 255,
-		B:     float32(shape.Color[2]) / 255,
-		A:     float32(shape.Color[3]) / 255,
+		ShapeType: shapeType,
+		X:         float32(shape.Data[0]),
+		Y:         float32(shape.Data[1]),
+		RX:        float32(shape.Data[2]),
+		RY:        float32(shape.Data[3]),
+		Theta:     float32(shape.Data[4]),
+		R:         float32(shape.Color[0]) / 255,
+		G:         float32(shape.Color[1]) / 255,
+		B:         float32(shape.Color[2]) / 255,
+		A:         float32(shape.Color[3]) / 255,
 	}, true
 }

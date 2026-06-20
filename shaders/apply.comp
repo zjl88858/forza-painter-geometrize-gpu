@@ -23,6 +23,7 @@ layout(push_constant) uniform Params {
     float cg;
     float cb;
     float ca;
+    int   shapeType;
 };
 
 void main() {
@@ -54,7 +55,18 @@ void main() {
     float dy = (float(y) + 0.5) - cy;
     float xr = dx * cosT + dy * sinT;
     float yr = -dx * sinT + dy * cosT;
-    if (xr * xr * invRX2 + yr * yr * invRY2 > 1.0) {
+    bool inside = false;
+    if (shapeType == 1) {
+        inside = (xr * xr * invRX2 + yr * yr * invRY2 <= 1.0);
+    } else if (shapeType == 2) {
+        if (yr >= -ry && yr <= ry) {
+            float halfWidth = rx * (yr + ry) / (2.0 * ry);
+            inside = (abs(xr) <= halfWidth);
+        }
+    } else {
+        inside = (abs(xr) <= rx && abs(yr) <= ry);
+    }
+    if (!inside) {
         return;
     }
 

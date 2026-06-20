@@ -691,7 +691,7 @@ func newVulkanBackend(target, current []float32, maskData []uint8, width, height
 	targetSize := len(target) * 4
 	currentSize := len(current) * 4
 	maskSize := maskPackedLen * 4
-	candSize := maxCandidates * 6 * 4
+	candSize := maxCandidates * 7 * 4
 	resultSize := maxCandidates * 4 * 4
 	gridBufSize := gridW * gridH * 4
 
@@ -997,15 +997,16 @@ func (v *vulkanBackend) SubmitEval(cands []model.Candidate) (EvalTicket, error) 
 			return EvalTicket{}, err
 		}
 	}
-	dst := unsafe.Slice((*float32)(v.candMapped[slot]), count*6)
+	dst := unsafe.Slice((*float32)(v.candMapped[slot]), count*7)
 	for i, c := range cands {
-		base := i * 6
+		base := i * 7
 		dst[base+0] = c.X
 		dst[base+1] = c.Y
 		dst[base+2] = c.RX
 		dst[base+3] = c.RY
 		dst[base+4] = c.Theta
 		dst[base+5] = c.A
+		dst[base+6] = float32(c.ShapeType)
 	}
 
 	if err := v.resetFence(slot); err != nil {
@@ -1989,12 +1990,14 @@ func (v *vulkanBackend) bindApplyArgs(cmdBuf vkCommandBuffer, slot, xMin, yMin, 
 		CX, CY, RXRaw, RYRaw   float32
 		ThetaDeg               float32
 		CR, CG, CB, CA         float32
+		ShapeType              int32
 	}
 	pc := applyPC{
 		Width: int32(v.width), Height: int32(v.height),
 		XMin: int32(xMin), YMin: int32(yMin), XMax: int32(xMax), YMax: int32(yMax),
 		CX: candidate.X, CY: candidate.Y, RXRaw: candidate.RX, RYRaw: candidate.RY,
 		ThetaDeg: candidate.Theta, CR: candidate.R, CG: candidate.G, CB: candidate.B, CA: candidate.A,
+		ShapeType: int32(candidate.ShapeType),
 	}
 	C.rawVkCmdPushConstants(cmdBuf, v.applyLayout, C.VK_SHADER_STAGE_COMPUTE_BIT, 0, C.uint32_t(unsafe.Sizeof(pc)), unsafe.Pointer(&pc))
 	return nil
