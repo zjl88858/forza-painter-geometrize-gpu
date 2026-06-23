@@ -111,7 +111,15 @@ func Run(opts Options) error {
 	// 	return err
 	// }
 	evaluator.SetUseWorkGroupEval(cfg.UseWorkGroupEval)
+	evaluator.SetErrorMetric(cfg.ErrorMetric)
 	defer evaluator.Close()
+
+	if cfg.ErrorMetric == "ssim" {
+		evaluator.SetSsimWeight(cfg.SsimWeight)
+		fmt.Printf("Error metric: SSIM (MSE/SSIM blended scoring, ssimWeight=%.2f)\n", cfg.SsimWeight)
+	} else {
+		fmt.Println("Error metric: MSE")
+	}
 
 	fmt.Printf("Backend: %s\n", resolveBackendName(opts.Backend))
 
@@ -367,6 +375,14 @@ func Run(opts Options) error {
 			return gErr
 		}
 		pendingGrid = newTicket
+
+		// Submit SSIM map recompute (queued behind apply + error grid).
+		// The map is device-only; no host-side waiting is needed.
+		if cfg.ErrorMetric == "ssim" {
+			if sErr := evaluator.SubmitSsimMap(); sErr != nil {
+				return sErr
+			}
+		}
 
 		fmt.Printf("[%d/%d] Step completed in %s\n", acceptedShapes, cfg.StopAt, time.Since(stepStart).Round(time.Millisecond))
 	}

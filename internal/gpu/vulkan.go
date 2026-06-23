@@ -969,6 +969,17 @@ func (v *vulkanBackend) Flush() error {
 func (v *vulkanBackend) SetUseWorkGroupEval(val bool) { v.useWorkGroupEval = val }
 func (v *vulkanBackend) SetSampleStep(val int)        { v.sampleStep = val }
 
+// SetErrorMetric is a no-op on Vulkan — SSIM is only supported via OpenCL.
+func (v *vulkanBackend) SetErrorMetric(metric string) {}
+
+// SetSsimWeight is a no-op on Vulkan — SSIM is only supported via OpenCL.
+func (v *vulkanBackend) SetSsimWeight(w float32) {}
+
+// SubmitSsimMap returns an error on Vulkan — SSIM is only supported via OpenCL.
+func (v *vulkanBackend) SubmitSsimMap() error {
+	return fmt.Errorf("SubmitSsimMap: not supported on Vulkan backend")
+}
+
 func (v *vulkanBackend) SubmitEval(cands []model.Candidate) (EvalTicket, error) {
 	count := len(cands)
 	if count == 0 {

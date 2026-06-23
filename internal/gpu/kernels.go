@@ -521,4 +521,279 @@ __kernel void compute_error_grid(
     }
     gridOut[gy * gridW + gx] = sum;
 }
+
+// ------------------------------------------------------------------
+// SSIM kernels — used when errorMetric = "ssim".
+//
+// compute_ssim_map is implemented as two separable passes:
+//   1. box_filter_h  — horizontal 11-pixel box filter of target/current luminance
+//   2. box_filter_v_ssim — vertical 11-pixel box filter + final SSIM per pixel
+//
+// The per-pixel DSSIM (1-SSIM) is stored into ssimMap and consumed by
+// the SSIM variants of the error-grid and candidate-evaluation kernels.
+// ------------------------------------------------------------------
+
+__kernel void box_filter_h(
+    __global const float4* target,
+    __global const float4* current,
+    __global float* out_mean_t,
+    __global float* out_mean_c,
+    __global float* out_mean_t2,
+    __global float* out_mean_c2,
+    __global float* out_mean_tc,
+    const int width,
+    const int height
+) {
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    if (x >= width || y >= height) return;
+
+    int radius = 5; // 11-wide window
+    float sum_t = 0.0f, sum_c = 0.0f;
+    float sum_t2 = 0.0f, sum_c2 = 0.0f, sum_tc = 0.0f;
+    int count = 0;
+
+    for (int dx = -radius; dx <= radius; dx++) {
+        int sx = x + dx;
+        if (sx < 0 || sx >= width) continue;
+        int sp = y * width + sx;
+        float4 t = target[sp];
+        float4 c = current[sp];
+        // BT.601 luminance
+        float yt = 0.299f * t.x + 0.587f * t.y + 0.114f * t.z;
+        float yc = 0.299f * c.x + 0.587f * c.y + 0.114f * c.z;
+        sum_t  += yt;
+        sum_c  += yc;
+        sum_t2 += yt * yt;
+        sum_c2 += yc * yc;
+        sum_tc += yt * yc;
+        count++;
+    }
+
+    float inv = 1.0f / (float)count;
+    int idx = y * width + x;
+    out_mean_t[idx]  = sum_t  * inv;
+    out_mean_c[idx]  = sum_c  * inv;
+    out_mean_t2[idx] = sum_t2 * inv;
+    out_mean_c2[idx] = sum_c2 * inv;
+    out_mean_tc[idx] = sum_tc * inv;
+}
+
+__kernel void box_filter_v_ssim(
+    __global const float* in_mean_t,
+    __global const float* in_mean_c,
+    __global const float* in_mean_t2,
+    __global const float* in_mean_c2,
+    __global const float* in_mean_tc,
+    __global float* ssim_map,
+    const int width,
+    const int height
+) {
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    if (x >= width || y >= height) return;
+
+    int radius = 5;
+    float sum_mt = 0.0f, sum_mc = 0.0f;
+    float sum_mt2 = 0.0f, sum_mc2 = 0.0f, sum_mtc = 0.0f;
+    int count = 0;
+
+    for (int dy = -radius; dy <= radius; dy++) {
+        int sy = y + dy;
+        if (sy < 0 || sy >= height) continue;
+        int sp = sy * width + x;
+        sum_mt  += in_mean_t[sp];
+        sum_mc  += in_mean_c[sp];
+        sum_mt2 += in_mean_t2[sp];
+        sum_mc2 += in_mean_c2[sp];
+        sum_mtc += in_mean_tc[sp];
+        count++;
+    }
+
+    float inv = 1.0f / (float)count;
+    float mu_t  = sum_mt  * inv;
+    float mu_c  = sum_mc  * inv;
+    float mu_t2 = sum_mt2 * inv;
+    float mu_c2 = sum_mc2 * inv;
+    float mu_tc = sum_mtc * inv;
+
+    float sigma_t2 = fmax(mu_t2 - mu_t * mu_t, 0.0f);
+    float sigma_c2 = fmax(mu_c2 - mu_c * mu_c, 0.0f);
+    float sigma_tc = mu_tc - mu_t * mu_c;
+
+    const float C1 = 1e-4f;
+    const float C2 = 9e-4f;
+    float num = (2.0f * mu_t * mu_c + C1) * (2.0f * sigma_tc + C2);
+    float den = (mu_t * mu_t + mu_c * mu_c + C1) * (sigma_t2 + sigma_c2 + C2);
+    float ssim = num / (den + 1e-12f);
+
+    ssim_map[y * width + x] = fmax(0.0f, 1.0f - ssim);
+}
+
+__kernel void compute_ssim_error_grid(
+    __global const float* ssim_map,
+    __global const uchar* opaqueMask,
+    __global float* gridOut,
+    const int width,
+    const int height,
+    const int gridW,
+    const int gridH
+) {
+    int gx = get_global_id(0);
+    int gy = get_global_id(1);
+    if (gx >= gridW || gy >= gridH) return;
+
+    int x0 = (int)(((long)gx * (long)width) / (long)gridW);
+    int x1 = (int)(((long)(gx + 1) * (long)width) / (long)gridW);
+    int y0 = (int)(((long)gy * (long)height) / (long)gridH);
+    int y1 = (int)(((long)(gy + 1) * (long)height) / (long)gridH);
+
+    float sum = 0.0f;
+    for (int y = y0; y < y1; ++y) {
+        int row = y * width;
+        for (int x = x0; x < x1; ++x) {
+            int p = row + x;
+            if (opaqueMask[p] == 0) continue;
+            sum += ssim_map[p];
+        }
+    }
+    gridOut[gy * gridW + gx] = sum;
+}
+
+__kernel void evaluate_candidates_ssim(
+    __global const float4* target,
+    __global const float4* current,
+    __global const uchar* opaqueMask,
+    __global const float* candidates,
+    __global const float* ssim_map,
+    __global float* results,
+    const int width,
+    const int height,
+    const int sampleStep,
+    const float ssimWeight
+) {
+    int gid = get_global_id(0);
+
+    int base = gid * 6;
+    float cx = candidates[base + 0];
+    float cy = candidates[base + 1];
+    float rx = fmax(candidates[base + 2], 1.0f);
+    float ry = fmax(candidates[base + 3], 1.0f);
+    float thetaDeg = candidates[base + 4];
+    float ca = clamp(candidates[base + 5], 1e-3f, 1.0f);
+
+    float theta = thetaDeg * 0.01745329251994329577f;
+    float cosT = cos(theta);
+    float sinT = sin(theta);
+    float invRX2 = 1.0f / (rx * rx);
+    float invRY2 = 1.0f / (ry * ry);
+
+    float rx2 = rx * rx;
+    float ry2 = ry * ry;
+    float cos2 = cosT * cosT;
+    float sin2 = sinT * sinT;
+    float ex = sqrt(rx2 * cos2 + ry2 * sin2);
+    float ey = sqrt(rx2 * sin2 + ry2 * cos2);
+
+    int xMin = (int)floor(cx - ex - 1.0f);
+    int xMax = (int)ceil(cx + ex + 1.0f);
+    int yMin = (int)floor(cy - ey - 1.0f);
+    int yMax = (int)ceil(cy + ey + 1.0f);
+
+    xMin = max(0, xMin);
+    yMin = max(0, yMin);
+    xMax = min(width - 1, xMax);
+    yMax = min(height - 1, yMax);
+
+    // MSE statistics (same as evaluate_candidates_v3)
+    int N = 0, Nt = 0;
+    float sTR = 0.0f, sTG = 0.0f, sTB = 0.0f, sTA = 0.0f;
+    float sCR = 0.0f, sCG = 0.0f, sCB = 0.0f, sCA = 0.0f;
+    float sCR2 = 0.0f, sCG2 = 0.0f, sCB2 = 0.0f, sCA2 = 0.0f;
+    float sTCR = 0.0f, sTCG = 0.0f, sTCB = 0.0f, sTCA = 0.0f;
+    // SSIM error accumulator
+    float ssimSum = 0.0f;
+
+    int sampleStride = max(sampleStep, 1);
+
+    for (int y = yMin; y <= yMax; y += sampleStride) {
+        int row = y * width;
+        float dy = ((float)y + 0.5f) - cy;
+        for (int x = xMin; x <= xMax; x += sampleStride) {
+            float dx = ((float)x + 0.5f) - cx;
+            float xr = dx * cosT + dy * sinT;
+            float yr = -dx * sinT + dy * cosT;
+            if (xr * xr * invRX2 + yr * yr * invRY2 > 1.0f) continue;
+
+            int p = row + x;
+            if (opaqueMask[p] == 0) {
+                Nt++;
+                continue;
+            }
+
+            float4 t = target[p];
+            float4 s = current[p];
+
+            sTR += t.x; sTG += t.y; sTB += t.z; sTA += t.w;
+            sCR += s.x; sCG += s.y; sCB += s.z; sCA += s.w;
+            sCR2 += s.x * s.x; sCG2 += s.y * s.y;
+            sCB2 += s.z * s.z; sCA2 += s.w * s.w;
+            sTCR += t.x * s.x; sTCG += t.y * s.y;
+            sTCB += t.z * s.z; sTCA += t.w * s.w;
+            ssimSum += ssim_map[p];
+            N++;
+        }
+    }
+
+    if (N == 0 || Nt > 64 || Nt * 400 > N) {
+        results[gid * 4 + 0] = 3.402823466e+38f;
+        results[gid * 4 + 1] = 0.0f;
+        results[gid * 4 + 2] = 0.0f;
+        results[gid * 4 + 3] = 0.0f;
+        return;
+    }
+
+    float Nf = (float)N;
+    float invN = 1.0f / Nf;
+    float invA = 1.0f - ca;
+
+    float oR = clamp((sTR * invN - (sCR * invN) * invA) / ca, 0.0f, 1.0f);
+    float oG = clamp((sTG * invN - (sCG * invN) * invA) / ca, 0.0f, 1.0f);
+    float oB = clamp((sTB * invN - (sCB * invN) * invA) / ca, 0.0f, 1.0f);
+
+    float a2 = ca * ca;
+    float two_a = 2.0f * ca;
+
+    // MSE delta (same as v3)
+    float dR = a2 * (Nf*oR*oR - 2.0f*oR*sCR + sCR2)
+             - two_a * (oR*sTR - oR*sCR - sTCR + sCR2);
+    float dG = a2 * (Nf*oG*oG - 2.0f*oG*sCG + sCG2)
+             - two_a * (oG*sTG - oG*sCG - sTCG + sCG2);
+    float dB = a2 * (Nf*oB*oB - 2.0f*oB*sCB + sCB2)
+             - two_a * (oB*sTB - oB*sCB - sTCB + sCB2);
+    float dA = a2 * (Nf - 2.0f*sCA + sCA2)
+             - two_a * (sTA - sCA - sTCA + sCA2);
+
+    float mseDelta = dR + dG + dB + dA;
+
+    float sampleScale = (float)(sampleStride * sampleStride);
+    mseDelta *= sampleScale;
+
+    // SSIM delta: -alpha * sum(ssim_err)  (first-order approximation)
+    float ssimDelta = -ca * ssimSum * sampleScale;
+
+    // Blend MSE and SSIM deltas; ssimWeight = 0 → pure MSE, 1 → pure SSIM
+    float mseW = 1.0f - clamp(ssimWeight, 0.0f, 1.0f);
+    float totalDelta = mseW * mseDelta + clamp(ssimWeight, 0.0f, 1.0f) * ssimDelta;
+
+    if (Nt > 0) {
+        float spillFrac = (float)Nt / (float)(N + Nt);
+        totalDelta += a2 * ((float)Nt) * (1.0f + 2.0f * spillFrac) * (oR*oR + oG*oG + oB*oB + 1.0f);
+    }
+
+    results[gid * 4 + 0] = totalDelta;
+    results[gid * 4 + 1] = oR;
+    results[gid * 4 + 2] = oG;
+    results[gid * 4 + 3] = oB;
+}
 `

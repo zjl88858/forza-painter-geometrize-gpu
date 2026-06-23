@@ -1,0 +1,11 @@
+# Ignore everything in subdirectories
+bin/*
+settings/*
+images/*
+runtime/*
+
+# But keep .gitkeep files so directories stay in version control
+!bin/.gitkeep
+!settings/.gitkeep
+!images/.gitkeep
+!runtime/.gitkeep

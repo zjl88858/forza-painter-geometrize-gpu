@@ -36,6 +36,12 @@ type Evaluator struct {
 	applyKernel  *cl.Kernel
 	gridKernel   *cl.Kernel
 
+	// SSIM kernels (created at init so compilation errors surface early).
+	boxFilterHKernel    *cl.Kernel
+	boxFilterVKernel    *cl.Kernel
+	ssimEvalKernel      *cl.Kernel
+	ssimErrorGridKernel *cl.Kernel
+
 	UseWorkGroupEval bool
 
 	SampleStep int
@@ -46,6 +52,13 @@ type Evaluator struct {
 	targetBuffer  *cl.MemObject
 	currentBuffer *cl.MemObject
 	maskBuffer    *cl.MemObject
+
+	// SSIM intermediate buffers for separable box filter.
+	ssimMeanBufT  *cl.MemObject
+	ssimMeanBufC  *cl.MemObject
+	ssimMeanBufT2 *cl.MemObject
+	ssimMeanBufC2 *cl.MemObject
+	ssimMeanBufTC *cl.MemObject
 
 	// Eval ring.
 	candBuffers   [ringSize]*cl.MemObject
@@ -62,6 +75,18 @@ type Evaluator struct {
 	gridSlots      [ringSize]gridSlot
 	nextGridSlot   int
 	gridSeq        uint64
+
+	// SSIM map ring.
+	ssimMapBufs     [ringSize]*cl.MemObject
+	hostSsimMaps    [ringSize][]float32
+	ssimMapSlots    [ringSize]gridSlot
+	nextSsimMapSlot int
+	ssimMapSeq      uint64
+
+	// SSIM config.
+	errorMetric     string  // "mse" (default) or "ssim"
+	ssimWeight      float32 // blend weight; 0 = pure MSE, 1 = pure SSIM
+	lastSsimMapSlot int     // most recently submitted SSIM map slot; -1 if none
 
 	width         int
 	height        int
@@ -190,6 +215,58 @@ func NewEvaluator(target, current []float32, mask []uint8, width, height, maxCan
 		return nil, err
 	}
 
+	// SSIM kernels — pre-created so compilation errors surface at init.
+	boxFilterHKernel, err := program.CreateKernel("box_filter_h")
+	if err != nil {
+		gridKernel.Release()
+		applyKernel.Release()
+		evalKernelV4.Release()
+		evalKernel.Release()
+		program.Release()
+		queue.Release()
+		ctx.Release()
+		return nil, fmt.Errorf("box_filter_h kernel: %w", err)
+	}
+	boxFilterVKernel, err := program.CreateKernel("box_filter_v_ssim")
+	if err != nil {
+		boxFilterHKernel.Release()
+		gridKernel.Release()
+		applyKernel.Release()
+		evalKernelV4.Release()
+		evalKernel.Release()
+		program.Release()
+		queue.Release()
+		ctx.Release()
+		return nil, fmt.Errorf("box_filter_v_ssim kernel: %w", err)
+	}
+	ssimEvalKernel, err := program.CreateKernel("evaluate_candidates_ssim")
+	if err != nil {
+		boxFilterVKernel.Release()
+		boxFilterHKernel.Release()
+		gridKernel.Release()
+		applyKernel.Release()
+		evalKernelV4.Release()
+		evalKernel.Release()
+		program.Release()
+		queue.Release()
+		ctx.Release()
+		return nil, fmt.Errorf("evaluate_candidates_ssim kernel: %w", err)
+	}
+	ssimErrorGridKernel, err := program.CreateKernel("compute_ssim_error_grid")
+	if err != nil {
+		ssimEvalKernel.Release()
+		boxFilterVKernel.Release()
+		boxFilterHKernel.Release()
+		gridKernel.Release()
+		applyKernel.Release()
+		evalKernelV4.Release()
+		evalKernel.Release()
+		program.Release()
+		queue.Release()
+		ctx.Release()
+		return nil, fmt.Errorf("compute_ssim_error_grid kernel: %w", err)
+	}
+
 	gridW := gridSize
 	gridH := gridSize
 	if width < gridW {
@@ -206,21 +283,28 @@ func NewEvaluator(target, current []float32, mask []uint8, width, height, maxCan
 	}
 
 	e := &Evaluator{
-		context:       ctx,
-		queue:         queue,
-		program:       program,
-		evalKernel:    evalKernel,
-		evalKernelV4:  evalKernelV4,
-		applyKernel:   applyKernel,
-		gridKernel:    gridKernel,
-		wgSize:        16, // 16×16 = 256 work-items per group
-		width:         width,
-		height:        height,
-		pixelCount:    width * height,
-		maxCandidates: maxCandidates,
-		gridW:         gridW,
-		gridH:         gridH,
-		SampleStep:    1,
+		context:             ctx,
+		queue:               queue,
+		program:             program,
+		evalKernel:          evalKernel,
+		evalKernelV4:        evalKernelV4,
+		applyKernel:         applyKernel,
+		gridKernel:          gridKernel,
+		boxFilterHKernel:    boxFilterHKernel,
+		boxFilterVKernel:    boxFilterVKernel,
+		ssimEvalKernel:      ssimEvalKernel,
+		ssimErrorGridKernel: ssimErrorGridKernel,
+		wgSize:              16, // 16×16 = 256 work-items per group
+		width:               width,
+		height:              height,
+		pixelCount:          width * height,
+		maxCandidates:       maxCandidates,
+		gridW:               gridW,
+		gridH:               gridH,
+		SampleStep:          1,
+		errorMetric:         "mse",
+		ssimWeight:          0.5,
+		lastSsimMapSlot:     -1,
 	}
 
 	cleanup := func() {
@@ -234,6 +318,24 @@ func NewEvaluator(target, current []float32, mask []uint8, width, height, maxCan
 			if e.errorGridBufs[i] != nil {
 				e.errorGridBufs[i].Release()
 			}
+			if e.ssimMapBufs[i] != nil {
+				e.ssimMapBufs[i].Release()
+			}
+		}
+		if e.ssimMeanBufT != nil {
+			e.ssimMeanBufT.Release()
+		}
+		if e.ssimMeanBufC != nil {
+			e.ssimMeanBufC.Release()
+		}
+		if e.ssimMeanBufT2 != nil {
+			e.ssimMeanBufT2.Release()
+		}
+		if e.ssimMeanBufC2 != nil {
+			e.ssimMeanBufC2.Release()
+		}
+		if e.ssimMeanBufTC != nil {
+			e.ssimMeanBufTC.Release()
 		}
 		if e.maskBuffer != nil {
 			e.maskBuffer.Release()
@@ -244,6 +346,10 @@ func NewEvaluator(target, current []float32, mask []uint8, width, height, maxCan
 		if e.targetBuffer != nil {
 			e.targetBuffer.Release()
 		}
+		ssimErrorGridKernel.Release()
+		ssimEvalKernel.Release()
+		boxFilterVKernel.Release()
+		boxFilterHKernel.Release()
 		gridKernel.Release()
 		applyKernel.Release()
 		evalKernelV4.Release()
@@ -291,6 +397,40 @@ func NewEvaluator(target, current []float32, mask []uint8, width, height, maxCan
 		e.hostErrorGrids[i] = make([]float32, gridW*gridH)
 	}
 
+	// SSIM intermediate buffers — one per-pixel float each, needed for
+	// the separable box-filter setup. Allocated lazily via ensureSsimBuffers.
+	if e.ssimMeanBufT, err = ctx.CreateEmptyBuffer(cl.MemReadWrite, e.pixelCount*4); err != nil {
+		cleanup()
+		return nil, err
+	}
+	if e.ssimMeanBufC, err = ctx.CreateEmptyBuffer(cl.MemReadWrite, e.pixelCount*4); err != nil {
+		cleanup()
+		return nil, err
+	}
+	if e.ssimMeanBufT2, err = ctx.CreateEmptyBuffer(cl.MemReadWrite, e.pixelCount*4); err != nil {
+		cleanup()
+		return nil, err
+	}
+	if e.ssimMeanBufC2, err = ctx.CreateEmptyBuffer(cl.MemReadWrite, e.pixelCount*4); err != nil {
+		cleanup()
+		return nil, err
+	}
+	if e.ssimMeanBufTC, err = ctx.CreateEmptyBuffer(cl.MemReadWrite, e.pixelCount*4); err != nil {
+		cleanup()
+		return nil, err
+	}
+
+	// SSIM map ring buffers — one per-pixel float per slot.
+	for i := 0; i < ringSize; i++ {
+		sbuf, sErr := ctx.CreateEmptyBuffer(cl.MemReadWrite, e.pixelCount*4)
+		if sErr != nil {
+			cleanup()
+			return nil, sErr
+		}
+		e.ssimMapBufs[i] = sbuf
+		e.hostSsimMaps[i] = make([]float32, e.pixelCount)
+	}
+
 	// Initial uploads. These are blocking because the engine has nothing
 	// useful to do until the buffers are resident anyway. We still release
 	// the returned events explicitly so the OpenCL runtime can free them
@@ -330,6 +470,24 @@ func (e *Evaluator) Close() error {
 		if e.candBuffers[i] != nil {
 			e.candBuffers[i].Release()
 		}
+		if e.ssimMapBufs[i] != nil {
+			e.ssimMapBufs[i].Release()
+		}
+	}
+	if e.ssimMeanBufT != nil {
+		e.ssimMeanBufT.Release()
+	}
+	if e.ssimMeanBufC != nil {
+		e.ssimMeanBufC.Release()
+	}
+	if e.ssimMeanBufT2 != nil {
+		e.ssimMeanBufT2.Release()
+	}
+	if e.ssimMeanBufC2 != nil {
+		e.ssimMeanBufC2.Release()
+	}
+	if e.ssimMeanBufTC != nil {
+		e.ssimMeanBufTC.Release()
 	}
 	if e.maskBuffer != nil {
 		e.maskBuffer.Release()
@@ -339,6 +497,18 @@ func (e *Evaluator) Close() error {
 	}
 	if e.targetBuffer != nil {
 		e.targetBuffer.Release()
+	}
+	if e.ssimErrorGridKernel != nil {
+		e.ssimErrorGridKernel.Release()
+	}
+	if e.ssimEvalKernel != nil {
+		e.ssimEvalKernel.Release()
+	}
+	if e.boxFilterVKernel != nil {
+		e.boxFilterVKernel.Release()
+	}
+	if e.boxFilterHKernel != nil {
+		e.boxFilterHKernel.Release()
 	}
 	if e.gridKernel != nil {
 		e.gridKernel.Release()
@@ -385,6 +555,11 @@ func (e *Evaluator) Flush() error {
 			e.gridSlots[i].readEvt.Release()
 			e.gridSlots[i].readEvt = nil
 			e.gridSlots[i].busy = false
+		}
+		if e.ssimMapSlots[i].busy && e.ssimMapSlots[i].readEvt != nil {
+			e.ssimMapSlots[i].readEvt.Release()
+			e.ssimMapSlots[i].readEvt = nil
+			e.ssimMapSlots[i].busy = false
 		}
 	}
 	return nil
@@ -461,6 +636,31 @@ func (e *Evaluator) SubmitEval(cands []model.Candidate) (EvalTicket, error) {
 			[]int{gs, gs},
 			nil,
 		)
+		if err != nil {
+			return EvalTicket{}, err
+		}
+		kernelEvt.Release()
+	} else if e.errorMetric == "ssim" {
+		// SSIM-aware evaluation: reads from the SSIM error map.
+		ssimBuf := e.ssimMapBufs[0]
+		if e.lastSsimMapSlot >= 0 {
+			ssimBuf = e.ssimMapBufs[e.lastSsimMapSlot]
+		}
+		if err := e.ssimEvalKernel.SetArgs(
+			e.targetBuffer,
+			e.currentBuffer,
+			e.maskBuffer,
+			e.candBuffers[slot],
+			ssimBuf,
+			e.resultBuffers[slot],
+			int32(e.width),
+			int32(e.height),
+			int32(e.SampleStep),
+			e.ssimWeight,
+		); err != nil {
+			return EvalTicket{}, err
+		}
+		kernelEvt, err := e.queue.EnqueueNDRangeKernel(e.ssimEvalKernel, nil, []int{count}, nil, nil)
 		if err != nil {
 			return EvalTicket{}, err
 		}
@@ -647,23 +847,47 @@ func (e *Evaluator) SubmitErrorGrid() (GridTicket, error) {
 		}
 	}
 
-	if err := e.gridKernel.SetArgs(
-		e.targetBuffer,
-		e.currentBuffer,
-		e.maskBuffer,
-		e.errorGridBufs[slot],
-		int32(e.width),
-		int32(e.height),
-		int32(e.gridW),
-		int32(e.gridH),
-	); err != nil {
-		return GridTicket{}, err
+	if e.errorMetric == "ssim" {
+		// SSIM error grid: samples from the pre-computed SSIM map.
+		ssimBuf := e.ssimMapBufs[0]
+		if e.lastSsimMapSlot >= 0 {
+			ssimBuf = e.ssimMapBufs[e.lastSsimMapSlot]
+		}
+		if err := e.ssimErrorGridKernel.SetArgs(
+			ssimBuf,
+			e.maskBuffer,
+			e.errorGridBufs[slot],
+			int32(e.width),
+			int32(e.height),
+			int32(e.gridW),
+			int32(e.gridH),
+		); err != nil {
+			return GridTicket{}, err
+		}
+		kernelEvt, err := e.queue.EnqueueNDRangeKernel(e.ssimErrorGridKernel, nil, []int{e.gridW, e.gridH}, nil, nil)
+		if err != nil {
+			return GridTicket{}, err
+		}
+		kernelEvt.Release()
+	} else {
+		if err := e.gridKernel.SetArgs(
+			e.targetBuffer,
+			e.currentBuffer,
+			e.maskBuffer,
+			e.errorGridBufs[slot],
+			int32(e.width),
+			int32(e.height),
+			int32(e.gridW),
+			int32(e.gridH),
+		); err != nil {
+			return GridTicket{}, err
+		}
+		kernelEvt, err := e.queue.EnqueueNDRangeKernel(e.gridKernel, nil, []int{e.gridW, e.gridH}, nil, nil)
+		if err != nil {
+			return GridTicket{}, err
+		}
+		kernelEvt.Release()
 	}
-	kernelEvt, err := e.queue.EnqueueNDRangeKernel(e.gridKernel, nil, []int{e.gridW, e.gridH}, nil, nil)
-	if err != nil {
-		return GridTicket{}, err
-	}
-	kernelEvt.Release()
 
 	readEvt, err := e.queue.EnqueueReadBufferFloat32(e.errorGridBufs[slot], false, 0, e.hostErrorGrids[slot], nil)
 	if err != nil {
@@ -751,6 +975,82 @@ func (e *Evaluator) ResetCurrentBuffer(current []float32) error {
 
 func (e *Evaluator) SetUseWorkGroupEval(v bool) { e.UseWorkGroupEval = v }
 func (e *Evaluator) SetSampleStep(v int)        { e.SampleStep = v }
+
+// SetErrorMetric configures the error metric used by the evaluator.
+// Valid values are "mse" (default) and "ssim".
+func (e *Evaluator) SetErrorMetric(metric string) {
+	metric = strings.ToLower(strings.TrimSpace(metric))
+	if metric != "mse" && metric != "ssim" {
+		return
+	}
+	e.errorMetric = metric
+}
+
+// SetSsimWeight sets the blend weight for SSIM mode.
+// 0 = pure MSE, 1 = pure SSIM (default 0.5).
+func (e *Evaluator) SetSsimWeight(w float32) {
+	if w < 0 {
+		w = 0
+	}
+	if w > 1 {
+		w = 1
+	}
+	e.ssimWeight = w
+}
+
+// SubmitSsimMap enqueues the two-pass box-filter → SSIM map computation
+// without blocking. The returned GridTicket can be waited on with
+// WaitErrorGrid (reuses the same ticket type since the readback flow
+// is identical).
+func (e *Evaluator) SubmitSsimMap() error {
+	// SSIM map is device-only — no host readback. The in-order queue
+	// guarantees that any subsequent eval / error-grid kernel sees the
+	// updated map.
+
+	// Pass 1: horizontal box filter — target/current → 5 mean buffers.
+	if err := e.boxFilterHKernel.SetArgs(
+		e.targetBuffer,
+		e.currentBuffer,
+		e.ssimMeanBufT,
+		e.ssimMeanBufC,
+		e.ssimMeanBufT2,
+		e.ssimMeanBufC2,
+		e.ssimMeanBufTC,
+		int32(e.width),
+		int32(e.height),
+	); err != nil {
+		return err
+	}
+	if evt, err := e.queue.EnqueueNDRangeKernel(e.boxFilterHKernel, nil, []int{e.width, e.height}, nil, nil); err != nil {
+		return err
+	} else {
+		evt.Release()
+	}
+
+	// Pass 2: vertical box filter + SSIM → ssim_map buffer.
+	slot := e.nextSsimMapSlot
+	e.nextSsimMapSlot = (e.nextSsimMapSlot + 1) % ringSize
+	if err := e.boxFilterVKernel.SetArgs(
+		e.ssimMeanBufT,
+		e.ssimMeanBufC,
+		e.ssimMeanBufT2,
+		e.ssimMeanBufC2,
+		e.ssimMeanBufTC,
+		e.ssimMapBufs[slot],
+		int32(e.width),
+		int32(e.height),
+	); err != nil {
+		return err
+	}
+	if evt, err := e.queue.EnqueueNDRangeKernel(e.boxFilterVKernel, nil, []int{e.width, e.height}, nil, nil); err != nil {
+		return err
+	} else {
+		evt.Release()
+	}
+
+	e.lastSsimMapSlot = slot
+	return nil
+}
 
 func scoreDevice(d *cl.Device) int64 {
 	var score int64
